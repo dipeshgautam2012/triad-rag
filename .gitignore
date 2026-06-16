@@ -2,8 +2,7 @@
 .venv313/
 # Local secrets / URLs — copy env.toml.bak → env.toml and fill values.
 env.toml
-retrieval/data/corpus/
-retrieval/data/index_store/
+retrieval/data/
 # Local doc scratch / auto-generated exports (not part of committed docs).
 docs/dump/
 # Eval: keep golden.jsonl in git; ignore generated report runs only.
