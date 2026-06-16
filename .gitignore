@@ -1,0 +1,15 @@
+.venv/
+.venv313/
+# Local secrets / URLs — copy env.toml.bak → env.toml and fill values.
+env.toml
+retrieval/data/corpus/
+retrieval/data/index_store/
+# Local doc scratch / auto-generated exports (not part of committed docs).
+docs/dump/
+changeplan.md
+__pycache__/
+*.pyc
+.env
+.pytest_cache/
+# Local scratch / experiments (not part of the service).
+generation/app/llm_temp.py
