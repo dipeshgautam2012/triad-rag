@@ -6,13 +6,33 @@
     "generation",
     "eval",
     "sandbox",
-    "ui",
+    "ui"
   ],
   "exclude": [".venv313", ".venv"],
-  "extraPaths": [
-    "retrieval",
-    ".venv313/lib/python3.13/site-packages"
-  ],
+  "venvPath": ".",
+  "venv": ".venv313",
   "pythonVersion": "3.13",
-  "reportMissingModuleSource": "none"
+  "reportMissingModuleSource": "none",
+  "executionEnvironments": [
+    {
+      "root": "retrieval",
+      "extraPaths": ["retrieval"]
+    },
+    {
+      "root": "generation",
+      "extraPaths": ["generation"]
+    },
+    {
+      "root": "orchestrator",
+      "extraPaths": ["orchestrator"]
+    },
+    {
+      "root": "eval",
+      "extraPaths": ["eval"]
+    },
+    {
+      "root": "examples",
+      "extraPaths": ["retrieval"]
+    }
+  ]
 }
