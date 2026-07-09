@@ -1,9 +1,0 @@
-# Streamlit theme for the RAG chat UI (read at startup — restart streamlit after edits).
-
-[theme]
-base = "light"
-primaryColor = "#6366F1"            # indigo — buttons, sliders, focus rings, active tab
-backgroundColor = "#FFFFFF"
-secondaryBackgroundColor = "#F4F5FB" # soft indigo-gray — inputs, expanders, sidebar
-textColor = "#1F2937"
-baseRadius = "10px"

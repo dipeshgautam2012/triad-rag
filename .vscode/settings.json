@@ -1,7 +1,0 @@
-{
-  "python.defaultInterpreterPath": "${workspaceFolder}/.venv313/bin/python3",
-  "python.analysis.extraPaths": [
-    "${workspaceFolder}/retrieval",
-    "${workspaceFolder}/.venv313/lib/python3.13/site-packages"
-  ]
-}

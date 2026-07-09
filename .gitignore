@@ -1,5 +1,7 @@
 .venv/
 .venv313/
+.vscode/
+.streamlit/
 # Local secrets / URLs — copy env.toml.bak → env.toml and fill values.
 env.toml
 # Runtime corpus/index stores (examples/*.py and sample.txt stay in git).
