@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 import chromadb
+from chromadb.api import ClientAPI
 from chromadb.errors import NotFoundError
 
 from app.stores.base_vector_store import IndexSnapshotError, BaseVectorStore
@@ -12,7 +13,7 @@ from app.stores.base_vector_store import IndexSnapshotError, BaseVectorStore
 _INDEX_ID = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
 
 
-def _chroma_client(store_root: Path) -> chromadb.PersistentClient:
+def _chroma_client(store_root: Path) -> ClientAPI:
     root = store_root.resolve() / "chroma"
     root.mkdir(parents=True, exist_ok=True)
     return chromadb.PersistentClient(path=str(root))
@@ -77,7 +78,7 @@ class ChromaVectorStore(BaseVectorStore):
         self._index_id = index_id
         self._store_root = store_root.resolve()
 
-    def _client(self) -> chromadb.PersistentClient:
+    def _client(self) -> ClientAPI:
         return _chroma_client(self._store_root)
 
     def exists(self) -> bool:

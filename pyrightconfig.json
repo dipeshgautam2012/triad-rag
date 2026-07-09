@@ -1,0 +1,18 @@
+{
+  "include": [
+    "retrieval",
+    "examples",
+    "orchestrator",
+    "generation",
+    "eval",
+    "sandbox",
+    "ui",
+  ],
+  "exclude": [".venv313", ".venv"],
+  "extraPaths": [
+    "retrieval",
+    ".venv313/lib/python3.13/site-packages"
+  ],
+  "pythonVersion": "3.13",
+  "reportMissingModuleSource": "none"
+}

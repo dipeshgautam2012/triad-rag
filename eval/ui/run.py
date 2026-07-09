@@ -1,9 +1,9 @@
 """
-Streamlit UI for RAG evaluation (dataset golden.jsonl → /retrieve + /query → metrics).
+Eval UI — run golden.jsonl against /retrieve + /query and write metrics.
 
 Run from ``triad-rag``::
 
-    streamlit run eval/eval_ui.py
+    streamlit run eval/ui/run.py
 
 Golden sets live under ``eval/datasets/<dataset_id>/golden.jsonl``.
 Each run writes ``eval/datasets/<dataset_id>/reports/<YYYYMMDDTHHMMSS>/report.csv``.
@@ -17,7 +17,7 @@ from pathlib import Path
 import httpx
 import streamlit as st
 
-_EVAL_DIR = Path(__file__).resolve().parent
+_EVAL_DIR = Path(__file__).resolve().parent.parent
 if str(_EVAL_DIR) not in sys.path:
     sys.path.insert(0, str(_EVAL_DIR))
 
@@ -44,6 +44,18 @@ DEFAULT_GENERATION = os.environ.get("GENERATION_API_URL", "http://127.0.0.1:8102
 
 
 @st.cache_data(ttl=15)
+def _fetch_ingest_options(api_base: str) -> tuple[dict[str, object], str | None]:
+    try:
+        r = httpx.get(f"{api_base.rstrip('/')}/ingest/options", timeout=httpx.Timeout(30.0))
+    except httpx.RequestError as e:
+        return ({}, str(e))
+    if r.status_code >= 400:
+        return ({}, f"HTTP {r.status_code}: {r.text[:200]}")
+    data = r.json()
+    return (data if isinstance(data, dict) else {}, None)
+
+
+@st.cache_data(ttl=15)
 def _fetch_models(orchestrator_base: str) -> tuple[dict, str | None]:
     try:
         r = httpx.get(f"{orchestrator_base.rstrip('/')}/models", timeout=httpx.Timeout(20.0))
@@ -60,20 +72,20 @@ def _fetch_indices(retrieval_base: str) -> tuple[list[str], str | None]:
     try:
         r = httpx.get(f"{retrieval_base.rstrip('/')}/indices", timeout=httpx.Timeout(30.0))
     except httpx.RequestError as e:
-        return (["default"], str(e))
+        return ([], str(e))
     if r.status_code >= 400:
-        return (["default"], f"HTTP {r.status_code}: {r.text[:200]}")
+        return ([], f"HTTP {r.status_code}: {r.text[:200]}")
     data = r.json()
     rows_raw = data.get("files")
     if isinstance(rows_raw, list):
         ids = sorted({str(x.get("index_id", "")).strip() for x in rows_raw if isinstance(x, dict)})
         ids = [i for i in ids if i]
-        return (ids if ids else ["default"], None)
+        return (ids, None)
     ids_raw = data.get("indices")
     if isinstance(ids_raw, list):
         ids = sorted({str(x).strip() for x in ids_raw if str(x).strip()})
-        return (ids if ids else ["default"], None)
-    return (["default"], "Invalid /indices response")
+        return (ids, None)
+    return ([], "Invalid /indices response")
 
 
 @st.cache_data(ttl=15)
@@ -214,11 +226,22 @@ def main() -> None:
     st.divider()
     st.header(":material/tune: Run settings")
 
+    ingest_opts, opts_err = _fetch_ingest_options(retrieval_url)
+    if opts_err:
+        st.caption(f"Could not load retrieval config ({opts_err}).")
+    elif ingest_opts:
+        with st.expander("Server config (`env.toml`)", icon=":material/tune:", expanded=False):
+            st.caption("Eval uses `search_expand` and `rerank_enabled` from config (no per-run overrides).")
+            st.json(ingest_opts)
+
     selected_provider, selected_alias = _provider_section(orchestrator_url)
 
     index_ids, idx_err = _fetch_indices(retrieval_url)
     if idx_err:
         st.warning(f"Could not load indices ({idx_err}).")
+    if not index_ids:
+        st.warning("No saved indexes on retrieval. Ingest documents in the Index UI first.")
+        st.stop()
 
     default_index_i = index_ids.index(dataset_id) if dataset_id in index_ids else 0
     index_id = st.selectbox(

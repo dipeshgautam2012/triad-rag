@@ -1,19 +1,9 @@
 """Base class for keyword (BM25) search over the same embedded chunks."""
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
 from typing import Any, Sequence
 
 from llama_index.core.schema import BaseNode
-
-
-@dataclass(frozen=True)
-class SparseHit:
-    """One BM25 hit — chunk id, text, score, and metadata."""
-    chunk_id: str
-    text: str
-    score: float
-    metadata: dict[str, Any]
 
 
 class BaseSparseStore(ABC):

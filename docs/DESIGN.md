@@ -10,62 +10,67 @@ Config: `env.toml` at repo root. LLM system prompt: `generation/prompts.toml`.
 
 - Three services — separate processes, **HTTP + JSON only** (no cross-imports).
 - **Settings** read in each service’s `main.py` and `config.py` only. Other code gets plain values and instances.
-- **Factories** (`make_chunker`, `make_provider`, …) called from `main.py`, not from deep packages.
-- **Ingester UI** → retrieval only. **Chat UI** → orchestrator only.
+- **Factories** (`make_chunker`, `make_provider`, …) called from each service’s composition root (`main.py` / `orchestration.py`), not from deep packages.
+- **Index UI** → retrieval only. **Chat UI** → orchestrator only. **Eval UI** → retrieval + orchestrator.
 
 ---
 
 ## System overview
 
-Two Streamlit apps, three backend services:
+Three Streamlit UIs, three backend services:
 
 | What | Role | Calls |
 |------|------|-------|
-| **Ingester UI** (`retrieval/ingester_ui.py`) | Upload files, manage collections, test search (passages only) | **Retrieval** `:8101` |
-| **Chat UI** (`app_ui.py`) | Ask questions; get answers + sources | **Orchestrator** `:8100` |
+| **Index UI** (`retrieval/ui/index.py`) | Upload files, manage collections, test search (passages only) | **Retrieval** `:8101` |
+| **Chat UI** (`ui/chat.py`) | Ask questions; get answers + sources | **Orchestrator** `:8100` |
+| **Eval UI** (`eval/ui/run.py`) | Golden-set batch metrics | **Retrieval** `:8101` + **Orchestrator** `:8100` |
 | **Retrieval** | Store files, build indexes, find passages | — |
 | **Orchestrator** | Chains retrieval + generation for Q&A | Retrieval `:8101`, Generation `:8102` |
 | **Generation** | Writes an answer from question + passages | External LLM API |
 
-**Upload:** Ingester UI → retrieval → files saved and indexed.
+**Upload:** Index UI → retrieval → files saved and indexed.
 
 **Chat:** Chat UI → orchestrator → retrieval (passages) → generation (answer) → Chat UI.
+
+**Eval:** Eval UI → retrieval `/retrieve` + orchestrator `/query` per golden row → CSV report.
 
 ![System overview](diagrams/system-overview.png)
 
 ---
 
-## Two UIs
+## Three UIs
 
 Different apps, run separately, for different jobs.
 
-### Ingester UI — upload and test search
+### Index UI — upload and test search
 
-**File:** `retrieval/ingester_ui.py` · **Run:** `streamlit run ingester_ui.py` (from `retrieval/`) · **Talks to:** `http://localhost:8101`
+**File:** `retrieval/ui/index.py` · **Run:** `streamlit run retrieval/ui/index.py` (from `triad-rag/`) · **Talks to:** `http://localhost:8101`
 
 | Tab / area | What you do | Retrieval endpoint |
 |------------|-------------|-------------------|
-| **Ingest** | Upload PDF/txt, pick indexer/chunker/model (new collection) | `POST /ingest` |
-| **Manage** | List collections, delete files/index | `GET /indices`, `DELETE …` |
-| **Retrieve** | Test search — passages and scores, no LLM | `POST /retrieve` |
+| **Ingest** | Upload PDF/txt; pick indexer/chunker/model (**new index only**) | `POST /ingest` |
+| **Manage** | List collections, delete files/index, edit description | `GET /indices`, `DELETE …`, `POST /indices/{id}/description` |
+| **Query** | Test search — passages and scores, no LLM | `POST /retrieve` |
 
-Use it to upload files, manage collections, and run search **without** an LLM answer — so you can see passages, scores, and (with rerank on) the wider hit list.
+`GET /indices` lists **saved** indexes only — an empty store shows no dropdown entry (use custom `index_id` for first ingest). **Server config** (`env.toml`) is shown read-only via `GET /ingest/options`.
+
+Use it to upload files, manage collections, and run search **without** an LLM answer — so you can see passages, scores, optional **expand**, and (with rerank on) the wider hit list.
 
 ```
-Ingester UI  ──────────────────────────────►  Retrieval :8101
-              (upload · manage · search)
+Index UI  ──────────────────────────────►  Retrieval :8101
+            (upload · manage · search)
 ```
 
 ### Chat UI — ask questions, get answers
 
-**File:** `app_ui.py` · **Run:** `streamlit run app_ui.py` (from `triad-rag/`) · **Talks to:** `http://localhost:8100`
+**File:** `ui/chat.py` · **Run:** `streamlit run ui/chat.py` (from `triad-rag/`) · **Talks to:** `http://localhost:8100`
 
 | What you do | You call (orchestrator) | Orchestrator then calls |
 |-------------|-------------------------|-------------------------|
 | Ask a question | `POST /query` | retrieval `POST /retrieve`, then generation `POST /generate` |
 | Pick collection or model | `GET /indices`, `GET /models`, `POST /models/select` | retrieval or generation |
 
-The Chat UI never calls retrieval or generation directly. Orchestrator does that for you.
+The Chat UI never calls retrieval or generation directly. Orchestrator does that for you. **Expand** for chat uses retrieval’s `search_expand` default from `env.toml` (orchestrator does not forward `expand` yet).
 
 ```
 Chat UI  ──POST /query──►  Orchestrator :8100
@@ -74,13 +79,19 @@ Chat UI  ──POST /query──►  Orchestrator :8100
                            ◄── answer + sources ──
 ```
 
-| | Ingester UI | Chat UI |
-|---|-------------|---------|
-| **Job** | Upload files; test search | Ask questions; get answers |
-| **Talks to** | Retrieval `:8101` | Orchestrator `:8100` |
-| **Search result** | Passage list | Answer + source passages |
-| **Extra hit list (rerank)?** | Yes | No |
-| **Uses LLM?** | No | Yes |
+### Eval UI — golden-set metrics
+
+**File:** `eval/ui/run.py` · **Run:** `streamlit run eval/ui/run.py` (from `triad-rag/`) · **Talks to:** retrieval + orchestrator
+
+Runs `eval/datasets/<id>/golden.jsonl` through `/retrieve` and `/query`, writes versioned CSV under `reports/`. Uses `rerank_enabled` and `search_expand` from `env.toml` (no per-run toggles in the UI).
+
+| | Index UI | Chat UI | Eval UI |
+|---|----------|---------|---------|
+| **Job** | Upload files; test search | Ask questions; get answers | Batch quality metrics |
+| **Talks to** | Retrieval `:8101` | Orchestrator `:8100` | Retrieval + orchestrator |
+| **Search result** | Passage list (+ optional `candidates`) | Answer + source passages | Metrics CSV |
+| **Expand / rerank** | Checkboxes on Query tab | Rerank checkbox; expand from config | Config defaults only |
+| **Uses LLM?** | No | Yes | Yes (via orchestrator `/query`) |
 
 ---
 
@@ -95,19 +106,25 @@ Services are independent processes. Each has `main.py` as the HTTP entry point a
 ```
 triad-rag/
 ├── env.toml                 # shared config ([retrieval], [generation], [orchestrator])
-├── app_ui.py                # Chat UI → orchestrator
+├── ui/
+│   └── chat.py              # Chat UI → orchestrator
+├── eval/
+│   └── ui/
+│       └── run.py           # Eval UI
 ├── orchestrator/
 │   └── app/
 │       ├── config.py
 │       └── main.py          # POST /query; calls retrieval + generation
 ├── retrieval/
-│   ├── ingester_ui.py       # Ingester UI → retrieval
+│   ├── ui/
+│   │   └── index.py         # Index UI → retrieval
 │   ├── data/
 │   │   ├── corpus/          # uploaded .txt / .pdf files
 │   │   └── index_store/     # Chroma, BM25, node stores
 │   └── app/
 │       ├── config.py
-│       ├── main.py          # ingest + retrieve APIs
+│       ├── main.py          # HTTP routes only
+│       ├── orchestration.py # ingest, search, index handles
 │       ├── chunkers/
 │       ├── embedders/
 │       ├── indexers/
@@ -138,13 +155,13 @@ triad-rag/
 | POST | `/models/select` | Change model (orchestrator calls generation) |
 | POST | `/indices/{id}/description` | Set description (orchestrator calls retrieval) |
 
-### Retrieval (`:8101`) — Ingester UI (and orchestrator for chat)
+### Retrieval (`:8101`) — Index UI (and orchestrator for chat)
 
 | Method | Path | Purpose |
 |--------|------|---------|
 | GET | `/health` | Health check |
-| GET | `/indices` | List collections and their settings |
-| GET | `/ingest/options` | Valid chunkers, models, indexers for upload |
+| GET | `/indices` | List saved collections and their settings |
+| GET | `/ingest/options` | Allowed chunkers/models/indexers + read-only `env.toml` defaults |
 | POST | `/ingest` | Upload a file and index it |
 | POST | `/retrieve` | Search: return top passages for a question |
 | POST | `/indices/{id}/description` | Update collection description |
@@ -153,9 +170,9 @@ triad-rag/
 | DELETE | `/indices/{id}/corpus` | Clear all files in a collection |
 | DELETE | `/indices/{id}/files/{name}` | Delete one file |
 
-**`POST /retrieve`:** send `query`, `top_k`, `index_id`, optional `rerank`. Returns passages in `chunks` (and optional `candidates` when rerank builds a wider list). Ingester UI uses this directly; orchestrator uses it during chat and only keeps `chunks`.
+**`POST /retrieve`:** send `query`, `top_k`, `index_id`, optional `rerank`, optional `expand`. Omitted `rerank` / `expand` fall back to `rerank_enabled` / `search_expand` in `env.toml`. Returns `chunks` (final hits) and optional `candidates` (pre-rerank / pre-trim pool). Index UI uses this directly; orchestrator uses it during chat and only keeps `chunks`.
 
-**`POST /ingest`:** upload a file (form fields). Ingester UI only.
+**`POST /ingest`:** multipart upload. On a **new** index you may set `indexer`, `chunker_name`, `embedding_model`, `index_description`. Re-ingest to an existing index must match stored chunker/embedding/indexer (409 otherwise). Chunk size/overlap and per-chunker tuning come from `env.toml` only.
 
 ### Generation (`:8102`) — answer from context
 
@@ -197,13 +214,13 @@ orchestrator/app/
 
 ## Retrieval workflow
 
-Ingester UI talks here directly. Orchestrator calls here when you chat.
+Index UI talks here directly. Orchestrator calls here when you chat.
 
-`main.py` loads settings, runs factories, and wires HTTP routes to packages. It is the **composition root** — the only place that reads config and calls `make_*` factories.
+`main.py` exposes HTTP routes. `orchestration.py` wires chunkers, indexers, stores, ingest, and search — the composition root for retrieval behavior.
 
-**Ingest:** save file → chunk → embed (if vector/hybrid) → write to stores → save index settings.
+**Ingest:** save file → chunk (settings from `env.toml`) → embed (if chroma/hybrid) → write to stores → record index metadata.
 
-**Retrieve:** load index → search by stored mode (vector, keyword, or both) → optional rerank → return passages.
+**Retrieve:** `search_index()` by stored mode (`chroma`, `bm25`, or `hybrid`) → optional expand → optional rerank → return passages.
 
 ![Retrieval workflow](diagrams/retrieval_main_workflow.png)
 
@@ -211,15 +228,16 @@ Ingester UI talks here directly. Orchestrator calls here when you chat.
 
 ```
 retrieval/app/
-├── main.py              # all HTTP routes; _search pipeline
+├── main.py              # HTTP routes
+├── orchestration.py     # ingest_file, search_index, index handles
 ├── config.py            # settings from env.toml [retrieval]
 ├── chunkers/            # split files into passages
 ├── embedders/           # text → vectors (HuggingFace)
-├── indexers/            # ChromaIndexer (vector), Bm25Indexer (keyword)
+├── indexers/            # ChromaIndexer, Bm25Indexer (search + expand)
 ├── stores/              # Chroma vector, node store, BM25 sparse
 ├── rerankers/           # optional second-pass scoring
-├── hybrid/              # merge vector + keyword results (RRF)
-└── ingest/              # file upload helpers
+├── hybrid/              # RRF merge (single __init__.py)
+└── ingest/              # corpus paths + file upload helpers
 ```
 
 ### Three storage roles
@@ -230,35 +248,37 @@ retrieval/app/
 | **Node** | Non-embedded nodes (e.g. parents) | Auto-merge to wider passages | `index_store/node_store/{id}.json` or `.sqlite` |
 | **Sparse** | Chunk text for BM25 | Keyword search | `index_store/sparse/<id>/` |
 
-### Search mode vs rerank
+### Search mode vs rerank vs expand
 
-**Search mode** (picked once at first upload, stored on the collection):
+**Indexer** (picked once at first upload, stored on the collection as `indexer`; API values `chroma`, `bm25`, `hybrid` — legacy metadata may say `vector` for chroma):
 
 | Mode | Meaning |
 |------|---------|
-| `vector` | Similar meaning to the question |
+| `chroma` | Similar meaning to the question (Chroma embeddings) |
 | `bm25` | Matching keywords |
-| `hybrid` | Both, then combined (rank fusion) |
-| rerank (optional) | Re-order a wider hit list for better results |
+| `hybrid` | Both, then combined (RRF) |
+| **expand** (optional per request) | Wider passage text (hierarchical parent, sentence window, etc.) via `search(..., expand=)` |
+| **rerank** (optional per request) | Re-order a wider hit list with a cross-encoder |
 
-**Order inside `_search`:**
+**Order inside `search_index()`:**
 
 ```
-bm25:     BM25 search → optional rerank
-hybrid:   vector search → BM25 search → fusion → optional rerank
-vector:   vector search → optional rerank
+bm25:     BM25 search → optional expand → optional rerank
+hybrid:   chroma search → BM25 search → RRF fusion → optional expand → optional rerank
+chroma:   chroma search → optional expand → optional rerank
 ```
 
-Fusion merges two hit lists (no model). Rerank re-scores one candidate list (cross-encoder). They are different optional stages.
+Fusion merges two hit lists (no model). Expand widens hit text from the node store / window metadata. Rerank re-scores one candidate list. They are separate optional stages.
 
 ### What each UI controls
 
-| UI | Talks to | At upload | At search |
-|----|----------|-----------|-----------|
-| **Ingester UI** | Retrieval `:8101` | Indexer, chunker, embedding model | Rerank checkbox only — search mode is fixed per collection |
-| **Chat UI** | Orchestrator `:8100` | Collection, model | Rerank checkbox (passed to retrieval) |
+| UI | Talks to | At upload | At search / eval |
+|----|----------|-----------|------------------|
+| **Index UI** | Retrieval `:8101` | Indexer, chunker, embedding (**new index only**); description | `top_k`, expand, rerank checkboxes |
+| **Chat UI** | Orchestrator `:8100` | Saved index, LLM model | `top_k`, rerank checkbox |
+| **Eval UI** | Retrieval + orchestrator | Dataset, index, model | `top_k`; rerank/expand from `env.toml` |
 
-Search mode is not chosen per question. It is stored on the collection when you first upload.
+Chunk size, overlap, and per-chunker tuning are **`env.toml` only** (shown read-only in UIs via `/ingest/options`). Search mode is not chosen per question; it is stored on the collection when you first upload.
 
 ### Example API flows
 
@@ -268,16 +288,16 @@ Who calls what, what JSON comes back, what the UI shows. Examples are shortened.
 
 | You do this | UI | HTTP call | Who returns the JSON |
 |-------------|-----|-----------|----------------------|
-| Upload a file | Ingester UI | `POST http://localhost:8101/ingest` | **Retrieval** |
-| Test search | Ingester UI | `POST http://localhost:8101/retrieve` | **Retrieval** |
+| Upload a file | Index UI | `POST http://localhost:8101/ingest` | **Retrieval** |
+| Test search | Index UI | `POST http://localhost:8101/retrieve` | **Retrieval** |
 | Ask a question | Chat UI | `POST http://localhost:8100/query` | **Orchestrator** (after retrieval + generation) |
-| List collections (ingester) | Ingester UI | `GET http://localhost:8101/indices` | **Retrieval** |
+| List collections (index UI) | Index UI | `GET http://localhost:8101/indices` | **Retrieval** |
 | List collections (chat) | Chat UI | `GET http://localhost:8100/indices` | **Orchestrator** (asks retrieval) |
 
 #### 1. Upload a file
 
 ```
-Ingester UI  ──POST /ingest──►  Retrieval :8101  ──►  IngestResponse
+Index UI  ──POST /ingest──►  Retrieval :8101  ──►  IngestResponse
 ```
 
 **Retrieval returns:**
@@ -296,17 +316,17 @@ Ingester UI  ──POST /ingest──►  Retrieval :8101  ──►  IngestResp
 
 | `indexer` at upload | What retrieval built | `embedding_model` |
 |---------------------|----------------------|-------------------|
-| `vector` | Chroma embeddings only | model name |
+| `chroma` | Chroma embeddings only | model name |
 | `bm25` | BM25 keyword index only | `null` |
-| `hybrid` | Both vector and BM25 | model name |
+| `hybrid` | Both chroma and BM25 | model name |
 
-#### 2. Test search (Ingester UI)
+#### 2. Test search (Index UI)
 
 ```
-Ingester UI  ──POST /retrieve──►  Retrieval :8101  ──►  RetrieveResponse
+Index UI  ──POST /retrieve──►  Retrieval :8101  ──►  RetrieveResponse
 ```
 
-You do **not** send search mode — retrieval reads `indexer` from collection metadata.
+You do **not** send indexer — retrieval reads `indexer` from collection metadata. You may send `rerank` and `expand` (or omit for `env.toml` defaults).
 
 ```json
 {
@@ -325,7 +345,7 @@ You do **not** send search mode — retrieval reads `indexer` from collection me
 }
 ```
 
-With **rerank on**, `chunks` is the reranked top-k and `candidates` holds the wider pre-rerank pool (Ingester UI shows both).
+With **rerank on**, `chunks` is the reranked top-k and `candidates` holds the wider pre-rerank pool (Index UI shows both).
 
 #### 3. Ask a question (Chat UI)
 
@@ -366,7 +386,7 @@ Chat UI  ──POST /query──►  Orchestrator :8100
 
 ## Generation workflow
 
-Used when you chat — orchestrator calls `POST /generate` after search. Ingester UI does not use this service.
+Used when you chat — orchestrator calls `POST /generate` after search. Index UI does not use this service.
 
 `main.py` loads settings, picks an LLM provider, calls `generate(question, context)`.
 
@@ -394,9 +414,9 @@ Config sources:
 
 Three levels of metadata in retrieval:
 
-1. **Service config** (`env.toml`) — global defaults: backends, rerank settings, allowed chunkers/models. Not stored per collection.
+1. **Service config** (`env.toml`) — global defaults: backends, `search_expand`, `rerank_enabled`, chunk size/overlap, allowed chunkers/models. Exposed read-only on `GET /ingest/options`. Not stored per collection.
 
-2. **Index metadata** (one record per collection in Chroma) — `embedding_model`, `chunker`, `indexer`, `description`. Set on first ingest; `indexer` is locked on re-ingest.
+2. **Index metadata** (one record per collection in Chroma) — `embedding_model`, `chunker`, `indexer`, `description`. Set on first ingest; indexer/chunker/embedding are locked on re-ingest.
 
 3. **Chunk metadata** (per passage) — `source`, `file_type`, optional `page` (PDF), `chunk_role` / `parent_id` (hierarchical), `window` / `original_text` (sentence window). Same dict is copied to vector store, node store, and BM25 store. Returned on `POST /retrieve` as `RetrievedChunk.metadata`.
 
@@ -410,5 +430,5 @@ Three levels of metadata in retrieval:
 |-----|----------|
 | [`../README.md`](../README.md) | Getting started, commands |
 | [`chunking-strategies.md`](chunking-strategies.md) | How each chunker splits documents |
-| [`retrieval-strategies.md`](retrieval-strategies.md) | Vector, BM25, hybrid, rerank |
-| [`diagrams/markdowns/`](diagrams/markdowns/) | Regenerate workflow images |
+| [`retrieval-strategies.md`](retrieval-strategies.md) | Chroma, BM25, hybrid, rerank, expand |
+| [`diagrams/markdowns/`](diagrams/markdowns/) | Workflow notes for regenerating images — **may lag code**; trust this file and source over those markdowns |

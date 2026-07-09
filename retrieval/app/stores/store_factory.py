@@ -2,6 +2,7 @@
 
 from pathlib import Path
 
+from app.indexers.base_indexer import validate_index_id
 from app.stores.base_node_store import BaseNodeStore
 from app.stores.base_sparse_store import BaseSparseStore
 from app.stores.base_vector_store import BaseVectorStore
@@ -23,6 +24,7 @@ def make_vector_store(
     backend: str,
     store_root: Path,
 ) -> BaseVectorStore:
+    validate_index_id(index_id)
     key = backend.strip().lower()
     if key not in VECTOR_BACKENDS:
         raise ValueError(f"unsupported vector backend: {backend!r}; supported: {sorted(VECTOR_BACKENDS)}")
@@ -36,6 +38,7 @@ def make_node_store(
     backend: str,
     store_root: Path,
 ) -> BaseNodeStore:
+    validate_index_id(index_id)
     key = backend.strip().lower()
     if key not in NODE_STORE_BACKENDS:
         raise ValueError(f"unsupported node_store backend: {backend!r}; supported: {sorted(NODE_STORE_BACKENDS)}")
@@ -51,6 +54,7 @@ def make_sparse_store(
     backend: str,
     store_root: Path,
 ) -> BaseSparseStore:
+    validate_index_id(index_id)
     key = backend.strip().lower()
     if key not in SPARSE_BACKENDS:
         raise ValueError(f"unsupported sparse backend: {backend!r}; supported: {sorted(SPARSE_BACKENDS)}")

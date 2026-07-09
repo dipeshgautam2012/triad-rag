@@ -6,7 +6,7 @@ All chunkers live in `retrieval/app/chunkers/` and use **LlamaIndex** node parse
 
 **Naming:** the **section-based** chunker splits on document structure (`#` headings). In config, API, and UI it is selected as **`markdown`** (implementation uses LlamaIndex `MarkdownNodeParser`). It only works on **markdown text** — not on PDF or other formats unless you convert them to markdown first (see [Section-based (`markdown`)](#section-based-markdown)).
 
-**Chunking vs search:** chunking decides *how* a file is cut into passages. **Retrieval** (vector, BM25, or hybrid — see [`retrieval-strategies.md`](retrieval-strategies.md)) decides *how* your question is matched against those passages. This doc covers both: how chunks are built and how search uses them.
+**Chunking vs search:** chunking decides *how* a file is cut into passages. **Retrieval** (chroma, BM25, or hybrid — see [`retrieval-strategies.md`](retrieval-strategies.md)) decides *how* your question is matched against those passages. This doc covers both: how chunks are built and how search uses them.
 
 ---
 
@@ -17,7 +17,7 @@ Every chunker outputs a **`ChunkSet`** with two lists:
 | List | Meaning | Used at ingest | Used at search |
 |------|---------|----------------|----------------|
 | **`embed_chunks`** | Passages that are **searchable** | Embedded into Chroma (vector/hybrid) and/or BM25 (bm25/hybrid) | **Always** — every indexer matches the question against these |
-| **`all_chunks`** | Full tree when some nodes are **not** embedded (e.g. parent sections) | Saved to the **node store** only — not searched directly | Lookup only — vector/hybrid may **expand** child hits to a parent passage |
+| **`all_chunks`** | Full tree when some nodes are **not** embedded (e.g. parent sections) | Saved to the **node store** only — not searched directly | Lookup only — chroma/hybrid may **expand** child hits to a parent passage |
 
 ```
 Ingest
@@ -33,9 +33,9 @@ Query (POST /retrieve)
       → chunks[] returned to UI
 ```
 
-**What comes back:** each hit is a `RetrievedChunk` with `chunk_id`, `text`, `score`, and `metadata` (`source`, `page`, etc.). The **`text`** field is what the Ingester UI and Chat UI show as the passage. Which string that is depends on the chunker (see **At retrieve time** under each strategy below).
+**What comes back:** each hit is a `RetrievedChunk` with `chunk_id`, `text`, `score`, and `metadata` (`source`, `page`, etc.). The **`text`** field is what the Index UI and Chat UI show as the passage. Which string that is depends on the chunker (see **At retrieve time** under each strategy below).
 
-The collection’s **indexer** (`vector`, `bm25`, `hybrid`) does not change how chunks are cut — it only changes *how* `embed_chunks` are scored. Rerank is a separate per-query toggle.
+The collection’s **indexer** (`chroma`, `bm25`, `hybrid`) does not change how chunks are cut — it only changes *how* `embed_chunks` are scored. Rerank and expand are separate per-query options (defaults in `env.toml`: `rerank_enabled`, `search_expand`).
 
 ---
 
@@ -46,7 +46,7 @@ The collection’s **indexer** (`vector`, `bm25`, `hybrid`) does not change how 
 | **simple** | General use, default | Every chunk | Same fixed-size passage that was embedded |
 | **section-based** (`markdown`) | Markdown `.txt` with `#` headings only | Every chunk (section-first, then size) | Same section passage that was embedded |
 | **hierarchical** | Small hits + wider context | Child chunks only | Child passage, or **parent** text if several children from same parent match |
-| **sentence_window** | Precise sentence matches | One window per sentence | **Window** text (surrounding sentences); single sentence in `metadata.original_text` |
+| **sentence_window** | Precise sentence matches | Anchor sentence per node | Window in `metadata`; `/retrieve` `text` uses window |
 | **semantic** | Topic-based boundaries | Topic-sized chunks | Same topic-sized passage that was embedded |
 
 | Chunker | Needs embeddings at chunk time? |
@@ -92,7 +92,7 @@ Section-based chunking splits on **document headings** (`#`, `##`, …) so each 
 
 > **Markdown only.** This chunker parses **markdown syntax** (`#` headings, etc.). It does **not** read PDF structure, Word outlines, or HTML tags. Upload **markdown text** (today: a `.txt` file whose content uses `#` headings). For **PDF** or any other format, convert to markdown **before** ingest (e.g. with Docling, pymupdf4llm, or LlamaParse) — or use **simple** / **hierarchical** on the raw file instead.
 
-**Chunker id:** `markdown` (Ingester UI, `chunker_name` on ingest, index metadata)
+**Chunker id:** `markdown` (Index UI, `chunker_name` on ingest, index metadata)
 
 **LlamaIndex:** `MarkdownNodeParser`, then `SentenceSplitter` for long sections
 
@@ -139,32 +139,23 @@ Chunk metadata includes `chunk_role` (`parent` / `child`) and `parent_id` on chi
 
 Config: `hierarchical_parent_multiplier` (how much larger parents are than children).
 
-**At retrieve time:** search runs on **children** (small, precise hits); parents live in the node store. On vector/hybrid, if `hierarchical_expand_parent = true`, a parent may replace its children when **`ratio > 0.4`**, where **`ratio`** is the number of children hit by search, out of the total number of children of that parent. BM25-only and the BM25 leg of hybrid never merge. Details: [Parent merge](#parent-merge-auto-merge).
+**At retrieve time:** search runs on **children** (small, precise hits); parents live in the node store. On **chroma/hybrid** with **`expand: true`** (or `search_expand` default), chroma may auto-merge children into a parent when **`ratio > 0.4`**, then widen text via the node store. BM25 uses node-store expansion only (no auto-merge). Details: [Parent merge](#parent-merge-auto-merge).
 
 ---
 
 ## sentence_window
 
-Each chunk is **one sentence**, but the text that gets **embedded** is a **window** of nearby sentences. That helps matching: the index sees more context than a single sentence alone.
+LlamaIndex `SentenceWindowNodeParser`: one **anchor sentence** per searchable node; a paired **window** node holds surrounding sentences in the node store.
 
-**LlamaIndex:** `SentenceWindowNodeParser`
+`window_size` = sentences on **each side** of the anchor ([LlamaIndex docs](https://developers.llamaindex.ai/python/framework/module_guides/loading/node_parsers/modules/)).
 
-**Example** — `window_size=3` (sentence in bold is the “original” sentence):
+- **`embed_chunks`:** anchor sentences (vector + BM25)
+- **`all_chunks`:** window passages (node store only)
+- Anchor metadata: `context_node_id` → window node id
 
-```
-Original sentence:  "Refunds are available within 30 days."
+**Search** matches the anchor. **`/retrieve` `text`** resolves the window from the node store via `passage_text()` in the indexers (not chunker-specific code in `main`).
 
-Embedded text:      "Our store policy is simple. Refunds are available within 30 days. Contact support to start a request."
-                     └──────── window stored in metadata as "window" ────────┘
-```
-
-Metadata stores `window` (embedded text) and `original_text` (the single sentence).
-
-Good for FAQ-style content where exact sentence boundaries matter.
-
-Config: `sentence_window_size`.
-
-**At retrieve time:** the index stores and matches the **window** (neighboring sentences), not the lone sentence — that gives richer vector/BM25 matches. The API `text` field is the window content. The exact sentence is in `metadata.original_text`; the window copy is also in `metadata.window`. Use `original_text` when you want the tight sentence; use `text` when you want what the ranker actually scored.
+Config: `sentence_window_size`. Re-ingest collections built with the old window-in-index behavior.
 
 ---
 
@@ -211,30 +202,32 @@ The chosen chunker name is saved on the collection as `chunker` in index metadat
 | **simple** | All chunks | — |
 | **section-based** (`markdown`) | All chunks | — |
 | **hierarchical** | Children only | Parents + children |
-| **sentence_window** | All chunks (window text) | — |
+| **sentence_window** | All chunks (anchor sentence) | — |
 | **semantic** | All chunks | — |
 
-At query time, **BM25 and vector always start from `embed_chunks`**. Only the **vector leg** (vector or hybrid collections) can expand child hits to a parent — see **Parent merge** below. BM25-only collections never merge.
+At query time, **BM25 and chroma always start from `embed_chunks`**. With **`expand`**, hits can be widened from the node store (`context_node_id`, sentence window, etc.). Hierarchical **parent auto-merge** (`ratio > 0.4`) runs on the **chroma leg** only — see **Parent merge** below.
 
 ### Parent merge (auto-merge)
 
-Applies to the **hierarchical** chunker on **vector** or **hybrid** collections only. The BM25 leg in hybrid always returns child text with no merge.
+Applies to the **hierarchical** chunker on **chroma** or **hybrid** collections when **`expand`** is on. The BM25 leg in hybrid does not auto-merge siblings into a parent (it may still use node-store text expansion).
 
 **What is `ratio`?**
 
 **`ratio`** is the number of children hit by search, out of the total number of children of that parent.
 
-Example: a parent has 10 children; vector search returns 5 of them → ratio is 5 out of 10, or **0.5**.
+Example: a parent has 10 children; chroma search returns 5 of them → ratio is 5 out of 10, or **0.5**.
 
-**Merge when `ratio > 0.4`** — replace those child hits with one parent passage (`text` = parent content; score = average of the merged children). Exactly 0.4 does **not** merge. The cutoff `0.4` is `simple_ratio_thresh`, **hardcoded** in `chroma_indexer.py` (not in `env.toml` today). Implemented by LlamaIndex `AutoMergingRetriever`.
+**Merge when `ratio > 0.4`** — replace those child hits with one parent passage (`text` = parent content; score = average of the merged children). Exactly 0.4 does **not** merge. The cutoff `0.4` is `simple_ratio_thresh`, **hardcoded** in `chroma_indexer.py` (not in `env.toml`). Implemented by LlamaIndex `AutoMergingRetriever` when `expand` is true.
+
+After that, `_expand_hit_context` in `base_indexer.py` may still replace text using `context_node_id` from the node store (sentence window, etc.).
 
 **When merge can run at all (all must be true):**
 
 | Requirement | Where it is set |
 |-------------|-----------------|
-| Collection indexer is `vector` or `hybrid` | Chosen at first upload |
+| Collection indexer is `chroma` or `hybrid` | Chosen at first upload |
 | Chunker is **hierarchical** (node store has parent nodes) | Chosen at first upload |
-| `hierarchical_expand_parent = true` | `env.toml` → `[retrieval]` |
+| `expand: true` on retrieve, or `search_expand = true` in `env.toml` | Per query or default |
 | Node store exists for the collection | Built at ingest when `all_chunks` is not `None` |
 
 **Examples:**
@@ -246,9 +239,9 @@ Example: a parent has 10 children; vector search returns 5 of them → ratio is 
 | 5 | 3 | 3 out of 5 (0.60) | Yes → merge |
 | 2 | 1 | 1 out of 2 (0.50) | Yes → merge |
 
-**Hybrid specifically:** merge runs on the **vector leg only**, before vector and BM25 lists are fused (RRF). BM25 hits stay as individual leaves/children. The fused list can therefore mix parent passages (from vector) with child passages (from BM25).
+**Hybrid specifically:** parent auto-merge runs on the **chroma leg only**, before RRF. BM25 hits stay as individual leaves unless node-store expansion applies. The fused list can mix parent passages (from chroma) with child passages (from BM25).
 
-**Tuning retrieval pool size (not the 0.4 cutoff):** `hybrid_candidate_multiplier` and `rerank_candidate_multiplier` in `env.toml` control how many hits are fetched *before* fusion/rerank — a wider pool makes it more likely several siblings land in the vector hit list, but the rule itself stays **`ratio > 0.4`**.
+**Tuning retrieval pool size (not the 0.4 cutoff):** `hybrid_candidate_multiplier` and `rerank_candidate_multiplier` in `env.toml` control how many hits are fetched *before* fusion/rerank — a wider pool makes it more likely several siblings land in the chroma hit list, but the rule itself stays **`ratio > 0.4`**.
 
 ---
 
@@ -263,4 +256,4 @@ Example: a parent has 10 children; vector search returns 5 of them → ratio is 
 | Short Q&A, precise sentences | **sentence_window** |
 | Topics change sharply within pages | **semantic** |
 
-See also: [`retrieval-strategies.md`](retrieval-strategies.md) (vector / BM25 / hybrid / rerank) · [`DESIGN.md`](DESIGN.md) · [`../README.md`](../README.md)
+See also: [`retrieval-strategies.md`](retrieval-strategies.md) (chroma / BM25 / hybrid / rerank / expand) · [`DESIGN.md`](DESIGN.md) · [`../README.md`](../README.md)

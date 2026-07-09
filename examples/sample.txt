@@ -1,0 +1,7 @@
+Triad RAG is a small retrieval stack with chunkers and indexers.
+
+Chunkers split documents into passages. The simple chunker uses fixed-size windows with overlap.
+
+Indexers store those passages and answer search queries. ChromaIndexer embeds text and runs similarity search. Bm25Indexer indexes keywords for lexical search.
+
+Upload a file, chunk it, index it, then query the index to get the most relevant passages.

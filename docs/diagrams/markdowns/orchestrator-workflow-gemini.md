@@ -170,19 +170,19 @@ If no hits: skip step 3; return empty-sources message (note in small text).
 
 **Total: 4 labeled arrows.** Do not add per-endpoint arrows.
 
-### Optional (muted, dashed)
+### Optional UIs (muted, dashed — omit if crowded)
 
-| From | To | Label |
-|------|-----|-------|
-| Chat UI (small box, bottom-left) | `main.py` | `POST /query` |
-
-Only if space allows; otherwise omit Chat UI entirely.
+| UI | Calls | Label |
+|----|-------|-------|
+| `ui/chat.py` | orchestrator `POST /query` | `POST /query` |
+| `retrieval/ui/index.py` | retrieval `:8101` directly (ingest, query) | *(no arrow to orchestrator)* |
+| `eval/ui/run.py` | retrieval + generation directly | *(no arrow to orchestrator)* |
 
 ### Do NOT draw
 
 - Retrieval → Generation (no direct link)
 - Arrows into inner endpoint lines inside external containers
-- Ingester UI (calls retrieval directly, not orchestrator)
+- Index UI (`retrieval/ui/index.py`) calls retrieval directly, not orchestrator
 - `triad-rag`, `COLUMN 1`, `ROW 1`, `Stack`, `A1`
 
 **Legend (tiny):** `—— HTTP` · `- - - optional caller`
@@ -225,7 +225,8 @@ ARROWS — exactly 4:
 
 NO arrow from Retrieval to Generation.
 NO factory packages inside orchestrator.
-Optional muted dashed: Chat UI → main.py "POST /query"
+Optional muted dashed: ui/chat.py → main.py "POST /query"
+Note (text only, no arrow): retrieval/ui/index.py and eval/ui/run.py call retrieval/generation directly
 
 Forbidden: triad-rag, PRD labels, COLUMN 1, ROW 1, Stack, A1, retrieval internal modules, generation internal modules.
 

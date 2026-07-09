@@ -1,6 +1,6 @@
 """Build indexers from injected store instances. Called from main only."""
 
-from app.indexers.base_indexer import IndexerDeps
+from app.embedders.base_embedder import BaseEmbedder
 from app.indexers.bm25_indexer import Bm25Indexer
 from app.indexers.chroma_indexer import ChromaIndexer
 from app.stores.base_node_store import BaseNodeStore
@@ -10,27 +10,29 @@ from app.stores.base_vector_store import BaseVectorStore
 
 def make_chroma_indexer(
     index_id: str,
-    deps: IndexerDeps,
     *,
-    vector_store: BaseVectorStore,
-    node_store: BaseNodeStore,
+    embedding_store: BaseVectorStore,
+    lookup_store: BaseNodeStore,
+    embedder: BaseEmbedder | None = None,
 ) -> ChromaIndexer:
-    return ChromaIndexer(
+    indexer = ChromaIndexer(
         index_id,
-        deps,
-        vector_store=vector_store,
-        node_store=node_store,
+        embedding_store=embedding_store,
+        lookup_store=lookup_store,
     )
+    if embedder is not None:
+        indexer.bind_embedder(embedder)
+    return indexer
 
 
 def make_bm25_indexer(
     index_id: str,
-    deps: IndexerDeps,
     *,
-    sparse_store: BaseSparseStore,
+    keyword_store: BaseSparseStore,
+    context_store: BaseNodeStore,
 ) -> Bm25Indexer:
     return Bm25Indexer(
         index_id,
-        deps,
-        sparse_store=sparse_store,
+        keyword_store=keyword_store,
+        context_store=context_store,
     )

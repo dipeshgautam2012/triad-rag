@@ -2,7 +2,8 @@
 .venv313/
 # Local secrets / URLs — copy env.toml.bak → env.toml and fill values.
 env.toml
-retrieval/data/
+# Runtime corpus/index stores (examples/*.py and sample.txt stay in git).
+data/
 # Local doc scratch / auto-generated exports (not part of committed docs).
 docs/dump/
 # Eval: keep golden.jsonl in git; ignore generated report runs only.
@@ -12,6 +13,7 @@ __pycache__/
 .env
 .pytest_cache/
 # Local scratch / experiments (not part of the service).
+sandbox/
 changeplan.md
 execution_plan.md
 generation/app/llm_temp.py

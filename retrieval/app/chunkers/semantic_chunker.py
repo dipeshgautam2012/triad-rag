@@ -15,13 +15,10 @@ class SemanticChunker(BaseChunker):
 
     def __init__(
         self,
-        chunk_size: int,
-        chunk_overlap: int,
         embed_model: BaseEmbedding,
         breakpoint_percentile_threshold: int = 95,
         buffer_size: int = 1,
     ) -> None:
-        super().__init__(chunk_size, chunk_overlap)
         self.embed_model = embed_model
         self.breakpoint_percentile_threshold = breakpoint_percentile_threshold
         self.buffer_size = max(1, buffer_size)

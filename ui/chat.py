@@ -1,9 +1,9 @@
 """
-Main Streamlit UI for triad-rag (through orchestrator).
+Chat UI — ask questions via the orchestrator (retrieval + generation).
 
 Run from ``triad-rag``::
 
-    streamlit run app_ui.py
+    streamlit run ui/chat.py
 
 Optional: ``export ORCHESTRATOR_API_URL=http://127.0.0.1:8100``
 """
@@ -14,6 +14,24 @@ import httpx
 import streamlit as st
 
 DEFAULT_API = os.environ.get("ORCHESTRATOR_API_URL", "http://127.0.0.1:8100")
+DEFAULT_RETRIEVAL = os.environ.get("RETRIEVAL_API_URL", "http://127.0.0.1:8101")
+
+
+def _opt_bool(opts: dict[str, object], key: str, default: bool) -> bool:
+    val = opts.get(key)
+    return val if isinstance(val, bool) else default
+
+
+@st.cache_data(ttl=15)
+def _fetch_ingest_options(api_base: str) -> tuple[dict[str, object], str | None]:
+    try:
+        r = httpx.get(f"{api_base.rstrip('/')}/ingest/options", timeout=httpx.Timeout(30.0))
+    except httpx.RequestError as e:
+        return ({}, str(e))
+    if r.status_code >= 400:
+        return ({}, f"HTTP {r.status_code}: {r.text[:200]}")
+    data = r.json()
+    return (data if isinstance(data, dict) else {}, None)
 
 
 @st.cache_data(ttl=15)
@@ -34,9 +52,9 @@ def _fetch_indices(api_base: str) -> tuple[list[dict[str, str]], str | None]:
     try:
         r = httpx.get(f"{api_base.rstrip('/')}/indices", timeout=httpx.Timeout(10.0))
     except httpx.RequestError as e:
-        return ([{"index_id": "default", "description": ""}], str(e))
+        return ([], str(e))
     if r.status_code >= 400:
-        return ([{"index_id": "default", "description": ""}], f"HTTP {r.status_code}: {r.text[:200]}")
+        return ([], f"HTTP {r.status_code}: {r.text[:200]}")
     data = r.json()
     rows_raw = data.get("files")
     if isinstance(rows_raw, list):
@@ -44,19 +62,21 @@ def _fetch_indices(api_base: str) -> tuple[list[dict[str, str]], str | None]:
         for x in rows_raw:
             if not isinstance(x, dict):
                 continue
+            index_id = str(x.get("index_id", "")).strip()
+            if not index_id:
+                continue
             rows.append(
                 {
-                    "index_id": str(x.get("index_id", "default")),
+                    "index_id": index_id,
                     "description": str(x.get("description", "")).strip(),
                 }
             )
-        rows = sorted(rows, key=lambda x: x["index_id"])
-        return (rows if rows else [{"index_id": "default", "description": ""}], None)
+        return (sorted(rows, key=lambda x: x["index_id"]), None)
     ids = data.get("indices")
     if not isinstance(ids, list):
-        return ([{"index_id": "default", "description": ""}], "Invalid /indices response")
-    rows = [{"index_id": str(x), "description": ""} for x in sorted({str(x) for x in ids})]
-    return (rows if rows else [{"index_id": "default", "description": ""}], None)
+        return ([], "Invalid /indices response")
+    rows = [{"index_id": str(x), "description": ""} for x in sorted({str(x).strip() for x in ids}) if str(x).strip()]
+    return (rows, None)
 
 
 def _sidebar_model_section(base: str) -> None:
@@ -142,8 +162,17 @@ def _sidebar_index_section(base: str) -> str:
     if idx_err:
         st.warning(f"Could not load `GET /indices` — list may be incomplete. ({idx_err})")
 
+    if not listed:
+        st.info("No saved indexes yet. Create one in the **Index UI** (`retrieval/ui/index.py`) first.")
+        if st.button("Refresh list", icon=":material/refresh:", use_container_width=True):
+            _fetch_indices.clear()
+            _fetch_models.clear()
+            _fetch_ingest_options.clear()
+            st.rerun()
+        return ""
+
     descriptions = {x["index_id"]: x["description"] for x in listed}
-    index_ids = [x["index_id"] for x in listed] or ["default"]
+    index_ids = [x["index_id"] for x in listed]
     default_i = index_ids.index("default") if "default" in index_ids else 0
     index_id = st.selectbox(
         "Saved index",
@@ -158,6 +187,7 @@ def _sidebar_index_section(base: str) -> str:
     if st.button("Refresh list", icon=":material/refresh:", use_container_width=True):
         _fetch_indices.clear()
         _fetch_models.clear()
+        _fetch_ingest_options.clear()
         st.rerun()
     return index_id
 
@@ -178,9 +208,24 @@ def main() -> None:
                 value=DEFAULT_API,
                 help="Base URL only (no trailing path). Example: http://127.0.0.1:8100",
             ).strip().rstrip("/")
+            retrieval_base = st.text_input(
+                "Retrieval base URL (config display)",
+                value=DEFAULT_RETRIEVAL,
+                help="Used only to show `env.toml` retrieval settings.",
+            ).strip().rstrip("/")
         if not base:
             st.warning("Enter the orchestrator API URL to continue.")
             st.stop()
+
+        ingest_opts: dict[str, object] = {}
+        if retrieval_base:
+            ingest_opts, opts_err = _fetch_ingest_options(retrieval_base)
+            if opts_err:
+                st.caption(f"Retrieval config unavailable ({opts_err}).")
+            elif ingest_opts:
+                with st.expander("Server config (`env.toml`)", icon=":material/tune:", expanded=False):
+                    st.caption("Expand uses `search_expand`. Rerank checkbox overrides `rerank_enabled`.")
+                    st.json(ingest_opts)
 
         st.divider()
         _sidebar_model_section(base)
@@ -202,6 +247,10 @@ def main() -> None:
                         st.json(r.json())
 
     st.title(":material/forum: Chat with your documents")
+    if not index_id:
+        st.markdown("Pick an index in the sidebar after you ingest documents in the Index UI.")
+        st.stop()
+
     st.markdown(
         "Ask questions in natural language. The orchestrator retrieves relevant chunks "
         f"from index `{index_id}` and the model answers using that context."
@@ -225,7 +274,7 @@ def main() -> None:
     with col_rr:
         use_rerank = st.checkbox(
             "Rerank results",
-            value=False,
+            value=_opt_bool(ingest_opts, "rerank_enabled", False),
             help="Re-score retrieved chunks with a cross-encoder before generation.",
             key="rerank_checkbox",
         )

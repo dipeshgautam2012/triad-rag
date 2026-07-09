@@ -1,4 +1,6 @@
-# Retrieval workflow — Gemini diagram (main + package containers)
+# Retrieval workflow — Gemini diagram (main + orchestration + packages)
+
+> **Diagram source of truth** for Gemini image generation. HTTP in `main.py`; ingest/search in `orchestration.py`. See [`retrieval-workflow-surface.md`](retrieval-workflow-surface.md) and [`DESIGN.md`](../../DESIGN.md).
 
 Generate from the **user layout sketch** + this spec. Attach the sketch image when prompting Gemini.
 
@@ -16,17 +18,18 @@ Generate from the **user layout sketch** + this spec. Attach the sketch image wh
 ┌─────────────────────────────────────────────────────────────────────────┐
 │  HEADER: env.toml ──loads──→ settings    code registries (no arrow)       │
 ├──────────────┬──────────────────────────────────────────────────────────┤
-│              │  ┌─ indexers/ ─────────────────────────────────────────┐ │
-│              │  │ indexer_factory │ BaseIndexer ┊ Chroma · Bm25      │ │
-│  main.py     │  └────────────────────────────────────────────────────┘ │
-│  API entry   │  ┌─ embedders/ ────────────────────────────────────────┐ │
-│              │  │ embedder_factory │ BaseEmbedder ┊ HuggingFace      │ │
-│  ──→ each    │  └────────────────────────────────────────────────────┘ │
-│  container   │  ┌─ chunkers/ ─ ... ────────────────────────────────────┐ │
-│              │  ┌─ stores/ ─ ... ─────────────────────────────────────┐ │
-│              │  ┌─ rerankers/ ─ ... ──────────────────────────────────┐ │
+│  main.py     │  ┌─ indexers/ ─────────────────────────────────────────┐ │
+│  HTTP routes │  │ indexer_factory │ BaseIndexer ┊ Chroma · Bm25      │ │
+│      │       │  └────────────────────────────────────────────────────┘ │
+│ delegates    │  ┌─ embedders/ ────────────────────────────────────────┐ │
+│      ↓       │  │ embedder_factory │ BaseEmbedder ┊ HuggingFace      │ │
+│ orchestration│  └────────────────────────────────────────────────────┘ │
+│  ingest ·    │  ┌─ chunkers/ ─ ... ────────────────────────────────────┐ │
+│  search ·    │  ┌─ stores/ ─ ... ─────────────────────────────────────┐ │
+│  handles     │  ┌─ rerankers/ ─ ... ──────────────────────────────────┐ │
 │              │  ┌─ ingest/ ─ ... ──────────────────────────────────────┐ │
-│              │  ┌─ hybrid/ ─ ... ─────────────────────────────────────┐ │
+│  ──→ each    │  ┌─ hybrid/ ─ ... ─────────────────────────────────────┐ │
+│  container   │                                                          │
 │  reads       │                                                          │
 │  settings ──→│                                                          │
 └──────────────┴──────────────────────────────────────────────────────────┘
@@ -82,33 +85,41 @@ Factory + base + derived all live **inside** the same container. The container b
 | 3 | **chunkers/** | `chunker_factory` \| `BaseChunker` ┊ 5 chunker classes |
 | 4 | **stores/** | `store_factory` \| vector \| node \| sparse mini-stacks |
 | 5 | **rerankers/** | `reranker_factory` \| `BaseReranker` ┊ `CrossEncoderReranker` |
-| 6 | **ingest/** | flat: `save_upload` · `sanitize_corpus_filename` |
-| 7 | **hybrid/** | flat: `combine_hybrid_results` · merge helpers · `reciprocal_rank_fusion` |
+| 6 | **ingest/** | flat: `save_upload` · `sanitize_corpus_filename` · `corpus_dir` · `list_corpus_files` · `unlink_corpus_file` |
+| 7 | **hybrid/** | single `__init__.py`: `combine_hybrid_results` · `node_from_retrieved` · `format_retrieved` · RRF helpers |
 
-**Left column:** `main.py` — all HTTP routes + helpers (see §2.1).
+**Left column:** `main.py` (HTTP routes) stacked above `orchestration.py` (ingest/search/handles). See §2.1.
 
 ---
 
-## 2.1 `main.py (API entry)` — full routes
+## 2.1 Left column — `main.py` + `orchestration.py`
 
-| Method | Route | Handler | Key calls (for arrow labels) |
-|--------|-------|---------|------------------------------|
+### `main.py (HTTP routes)`
+
+| Method | Route | Handler | Delegates to |
+|--------|-------|---------|--------------|
 | GET | `/health` | `health()` | — |
-| GET | `/indices` | `list_indices` | `list_indices_detailed`, `_read_indexer_choice`, `make_sparse_store` |
-| GET | `/ingest/options` | `ingest_options` | `_available_indexers`, `settings` |
-| POST | `/ingest` | `ingest` | `save_upload`, `make_embedder`, `make_chunker`, `chunk_file`, `add_chunks` |
-| POST | `/retrieve` | `retrieve` | `_index_handles`, `_ensure_loaded`, `_search`, `reranker.rerank` |
-| POST | `/indices/{index_id}/description` | `set_index_description` | `write_index_description` |
-| DELETE | `/indices/{index_id}` | `delete_index` | `_delete_index_storage` |
-| GET | `/indices/{index_id}/files` | `list_corpus_files` | `chroma.list_corpus_files` |
-| DELETE | `/indices/{index_id}/corpus` | `clear_corpus` | `bm25.delete_by_source`, `chroma.delete_corpus_file` |
-| DELETE | `/indices/{index_id}/files/{filename}` | `delete_corpus_file` | `sanitize_corpus_filename`, `bm25.delete_by_source`, `chroma.delete_corpus_file` |
+| GET | `/indices` | `get_indices` | `list_indices` |
+| GET | `/ingest/options` | `ingest_options` | `available_indexers`, `settings` |
+| POST | `/ingest` | `ingest` | `ingest_file` |
+| POST | `/retrieve` | `retrieve` | `index_handles`, `ensure_loaded`, `search_index` |
+| POST | `/indices/{index_id}/description` | `set_description` | `write_index_description` |
+| DELETE | `/indices/{index_id}` | `delete_index_route` | `delete_index` |
+| GET | `/indices/{index_id}/files` | `list_corpus` | `list_corpus_files` |
+| DELETE | `/indices/{index_id}/corpus` | `clear_corpus` | `remove_source`, `unlink_corpus_file` |
+| DELETE | `/indices/{index_id}/files/{filename}` | `delete_corpus_file` | `remove_source`, `unlink_corpus_file` |
 
-**Helpers** (one muted line in box, not separate boxes):
+**Models (muted line):** `RetrieveRequest` (`query`, `top_k`, `index_id`, `rerank`, `expand`) · `RetrieveResponse` · `IngestResponse`
 
-`_index_handles` · `_search` · `_bind_embedder` · `_ensure_loaded` · `_read_indexer_choice` · `_write_indexer_choice` · `_validate_index_id` · `_preload_embedding_models`
+### `orchestration.py (wire)`
 
-**Startup (`lifespan`):** validates `CHUNKERS`, `_preload_embedding_models`, `make_reranker`, `_index_handles`, `load`, `_bind_embedder`
+**Helpers** (one muted line in box):
+
+`index_handles` · `search_index` · `ingest_file` · `ensure_loaded` · `startup` · `read_indexer_mode` · `write_indexer_mode` · `resolve_ingest_mode` · `available_indexers` · `list_indices` · `delete_index` · `remove_source`
+
+**Startup (`startup`, called from `lifespan`):** validates `CHUNKERS`, preloads embedders, `make_reranker`, warms `default` index
+
+**Indexer ids:** `chroma` · `bm25` · `hybrid` (`vector` normalized to `chroma`)
 
 ---
 
@@ -120,7 +131,7 @@ Thin band **above** the main + containers layout:
 |-----|------|
 | `env.toml` | `[retrieval]` section |
 | `settings` | `config.py` — paths · `*_backend` · `available_chunkers` · `available_embedding_models` · defaults · rerank/hybrid flags |
-| `code registries` | `CHUNKERS` · `EMBEDDER_BACKENDS` · `RERANKER_BACKENDS` · `VECTOR_BACKENDS` · `NODE_STORE_BACKENDS` · `SPARSE_BACKENDS` · `INDEXER_CHOICES` |
+| `code registries` | `CHUNKERS` · `EMBEDDER_BACKENDS` · `RERANKER_BACKENDS` · `VECTOR_BACKENDS` · `NODE_STORE_BACKENDS` · `SPARSE_BACKENDS` · `INDEXER_MODES` |
 
 ---
 
@@ -138,8 +149,8 @@ Each subsection = one bordered container. **Left** = factory (if any). **Right**
 - **BaseIndexer** (+ `validate_index_id`)
 - dashed ↓
 - Implementation box:
-  - **ChromaIndexer** — `load` · `bind_embedder` · `add_chunks` · `search` · `delete_index` · `delete_corpus_file`
-  - **Bm25Indexer** — `load` · `add_chunks` · `search` · `delete_index` · `delete_by_source`
+  - **ChromaIndexer** — `load` · `bind_embedder` · `add_chunks` · `search` · `delete_index` · `remove_source`
+  - **Bm25Indexer** — `load` · `add_chunks` · `search` · `delete_index` · `remove_source` · `delete_by_source`
   - *index metadata via Chroma collection (embedding_model, chunker, description, indexer)*
 
 ### Container 2: `embedders/`
@@ -177,11 +188,11 @@ Note under vector: `list_indices_detailed` · `write_index_description`
 
 ### Container 6: `ingest/` (flat inside border)
 
-`save_upload` · `sanitize_corpus_filename`
+`save_upload` · `sanitize_corpus_filename` · `corpus_dir` · `list_corpus_files` · `unlink_corpus_file`
 
-### Container 7: `hybrid/` (flat inside border)
+### Container 7: `hybrid/` (flat inside border — single module)
 
-`combine_hybrid_results` · `merge_hybrid_hits` · `reciprocal_rank_fusion` · `node_from_retrieved` · `sparse_hit_from_retrieved` · `format_retrieved`
+`combine_hybrid_results` · `node_from_retrieved` · `format_retrieved` · `_reciprocal_rank_fusion` · `_merge_hybrid_hits`
 
 ---
 
@@ -198,9 +209,9 @@ Stored on the vector collection at ingest; read by `GET /indices` and `POST /ret
 | `embedding_model` | `create_collection` / ingest | lock model on re-ingest |
 | `chunker` | `create_collection` / ingest | lock chunker on re-ingest |
 | `description` | ingest or `write_index_description` | index label in `/indices` |
-| `indexer` | `_write_indexer_choice` after ingest | search mode: vector / bm25 / hybrid |
+| `indexer` | `write_indexer_mode` after ingest | search mode: chroma / bm25 / hybrid |
 
-**Functions (already in diagram):** `create_collection` · `modify_metadata` · `resolve_embedding_model` · `resolve_chunker` · `read_description` · `_read_indexer_choice` · `_write_indexer_choice` · `write_index_description`
+**Functions (already in diagram):** `create_collection` · `modify_metadata` · `resolve_embedding_model` · `resolve_chunker` · `read_description` · `read_indexer_mode` · `write_indexer_mode` · `write_index_description`
 
 **Where to show:** small note under **ChromaVectorStore** or **ChromaIndexer**: *collection metadata: embedding_model, chunker, description, indexer*
 
@@ -215,7 +226,7 @@ Attached to each chunk node; flows through search → hybrid → rerank → `POS
 | `page` | PDF pages |
 | `chunk_role` · `parent_id` | hierarchical chunking |
 
-**Where to show:** one muted line in **main.py** box: *RetrieveResponse: chunk_id, text, score, metadata* — or note on **BaseChunker**: *chunk metadata at ingest*
+**Where to show:** one muted line in **`main.py`** box: *RetrieveResponse: chunk_id, text, score, metadata* — or note on **BaseChunker**: *chunk metadata at ingest*
 
 ### No metadata arrows
 
@@ -233,20 +244,21 @@ Do not draw arrows for metadata flow. Arrow count stays per §3 only.
 |------|-----|-------|
 | `env.toml` | `settings` | `loads` |
 
-### From main.py (8 arrows — one per target)
+### From left column (9 arrows — plus config above)
 
 | From | To | Label |
 |------|-----|-------|
-| `main.py` | `settings` (header) | `reads settings` |
-| `main.py` | **`indexers/` container** | `indexers` |
-| `main.py` | **`embedders/` container** | `embedders` |
-| `main.py` | **`chunkers/` container** | `chunkers` |
-| `main.py` | **`stores/` container** | `stores` |
-| `main.py` | **`rerankers/` container** | `rerankers` |
-| `main.py` | **`ingest/` container** | `ingest` |
-| `main.py` | **`hybrid/` container** | `hybrid` |
+| `orchestration.py` | `settings` (header) | `reads settings` |
+| `main.py` | `orchestration.py` | `delegates` |
+| `orchestration.py` | **`indexers/` container** | `indexers` |
+| `orchestration.py` | **`embedders/` container** | `embedders` |
+| `orchestration.py` | **`chunkers/` container** | `chunkers` |
+| `orchestration.py` | **`stores/` container** | `stores` |
+| `orchestration.py` | **`rerankers/` container** | `rerankers` |
+| `orchestration.py` | **`ingest/` container** | `ingest` |
+| `orchestration.py` | **`hybrid/` container** | `hybrid` |
 
-**Total labeled arrows: 9** (1 config + 8 from main). Use short labels above — no function lists on arrows.
+**Total labeled arrows: 10** (1 config `loads` + 9 above). Use short labels — no function lists on arrows.
 
 ### Structural lines only (not arrows)
 
@@ -259,7 +271,7 @@ Do not draw arrows for metadata flow. Arrow count stays per §3 only.
 ### Do NOT draw or write on the image
 
 - Arrows into `ChromaIndexer` / inner classes (stop at container border)
-- Extra arrows beyond the 9 listed
+- Extra arrows beyond the 10 listed
 - `A1` / `A2` / `triad-rag` / `Stack`
 - **Layout labels:** `COLUMN 1`, `COLUMN 2`, `ROW 1`, `ROW 2`, `Container 1`, `#1`, `LEFT`, `RIGHT`, `grid`, or any spec numbering from this document
 
@@ -275,7 +287,7 @@ You are redrawing an architecture diagram. I am attaching my LAYOUT SKETCH — c
 TASK: Expand to the full retrieval service using PACKAGE CONTAINERS.
 
 LAYOUT:
-- LEFT: tall "main.py (API entry)" box with all HTTP routes + helpers
+- LEFT: stacked boxes — "main.py (HTTP routes)" on top, "orchestration.py (wire)" below
 - RIGHT: stack of 7 BORDERED CONTAINERS (one per package), each with a header bar
 - TOP: config header band — env.toml, settings, code registries (not inside a container)
 
@@ -291,7 +303,7 @@ STORES container: same border; inside: store_factory left; right = 3 sub-columns
 
 INGEST / HYBRID containers: border + header; flat function list inside (no factory/base split)
 
-TITLE: "Retrieval — main.py workflow"
+TITLE: "Retrieval — API workflow"
 
 CONTAINERS (top to bottom):
 1. indexers/ — indexer_factory | BaseIndexer ┊ ChromaIndexer, Bm25Indexer (+ metadata note)
@@ -299,25 +311,28 @@ CONTAINERS (top to bottom):
 3. chunkers/ — chunker_factory | BaseChunker ┊ 5 chunker classes
 4. stores/ — store_factory | vector/node/sparse mini-stacks
 5. rerankers/ — reranker_factory | BaseReranker ┊ CrossEncoderReranker
-6. ingest/ — save_upload, sanitize_corpus_filename
-7. hybrid/ — combine_hybrid_results, merge_hybrid_hits, reciprocal_rank_fusion, helpers
+6. ingest/ — save_upload, sanitize_corpus_filename, corpus_dir, list_corpus_files, unlink_corpus_file
+7. hybrid/ — combine_hybrid_results, node_from_retrieved, format_retrieved, RRF helpers (single __init__.py)
 
 main.py routes (all 10): GET /health, GET /indices, GET /ingest/options, POST /ingest, POST /retrieve, POST /indices/{id}/description, DELETE /indices/{id}, DELETE .../corpus, DELETE .../files/{filename}
 
-ARROWS — exactly 9, hit CONTAINER BORDERS or settings box:
+orchestration.py: index_handles, ingest_file, search_index (expand/rerank), startup, read/write_indexer_mode
+
+ARROWS — exactly 10, hit CONTAINER BORDERS or settings/main/orchestration boxes:
 1. env.toml → settings: "loads"
-2. main.py → settings: "reads settings"
-3. main.py → indexers/ container: "indexers"
-4. main.py → embedders/ container: "embedders"
-5. main.py → chunkers/ container: "chunkers"
-6. main.py → stores/ container: "stores"
-7. main.py → rerankers/ container: "rerankers"
-8. main.py → ingest/ container: "ingest"
-9. main.py → hybrid/ container: "hybrid"
+2. orchestration.py → settings: "reads settings"
+3. main.py → orchestration.py: "delegates"
+4. orchestration.py → indexers/ container: "indexers"
+5. orchestration.py → embedders/ container: "embedders"
+6. orchestration.py → chunkers/ container: "chunkers"
+7. orchestration.py → stores/ container: "stores"
+8. orchestration.py → rerankers/ container: "rerankers"
+9. orchestration.py → ingest/ container: "ingest"
+10. orchestration.py → hybrid/ container: "hybrid"
 
 Inside containers: dashed vertical base→derived only. NO creates arrows. NO arrows to inner classes.
 
-FORBIDDEN: one mega "packages" wrapper; arrows to ChromaIndexer; Stack; A1; triad-rag; extra arrows beyond 9; layout labels (COLUMN 1, ROW 1, Container 1, #1, LEFT/RIGHT grid text — use real module names only).
+FORBIDDEN: one mega "packages" wrapper; arrows to ChromaIndexer; Stack; A1; triad-rag; extra arrows beyond 10; layout labels (COLUMN 1, ROW 1, Container 1, #1, LEFT/RIGHT grid text — use real module names only).
 
 Output one diagram image.
 ```
@@ -332,13 +347,14 @@ Redraw with PACKAGE CONTAINERS.
 Fix:
 1. Each module (indexers, embedders, chunkers, stores, rerankers, ingest, hybrid) has its own BORDERED container with header
 2. Inside each factory container: factory (left) + base + derived (right) — all inside the border
-3. main.py → one arrow to EACH container border (labels: indexers, embedders, chunkers, stores, rerankers, ingest, hybrid)
-4. main.py → settings: reads settings; env.toml → settings: loads
-5. Dashed base→derived inside containers only; no creates arrows; no arrows to inner classes
-6. No single mega "packages" wrapper around everything
-7. Remove COLUMN 1, ROW 1, Container 1, #1, or any grid/layout labels — use real names only (main.py, indexers/, etc.)
+3. LEFT column: main.py (routes) above orchestration.py (wire); main → orchestration: delegates
+4. orchestration.py → one arrow to EACH container border (labels: indexers, embedders, chunkers, stores, rerankers, ingest, hybrid)
+5. orchestration.py → settings: reads settings; env.toml → settings: loads
+6. Dashed base→derived inside containers only; no creates arrows; no arrows to inner classes
+7. No single mega "packages" wrapper around everything
+8. Remove COLUMN 1, ROW 1, Container 1, #1, or any grid/layout labels — use real names only (main.py, orchestration.py, indexers/, etc.)
 
-Keep title: Retrieval — main.py workflow
+Keep title: Retrieval — API workflow
 ```
 
 ---
@@ -350,17 +366,18 @@ Keep title: Retrieval — main.py workflow
 - [ ] Inside each factory container: factory + base + derived **inside** the border
 - [ ] Store container: 3 sub-columns inside border
 
-**main.py**
-- [ ] All 10 HTTP routes listed
-- [ ] Helpers + chunk metadata note
+**main.py + orchestration.py**
+- [ ] All 10 HTTP routes in main.py
+- [ ] orchestration helpers + indexer ids (chroma/bm25/hybrid)
+- [ ] Chunk metadata note
 
-**Arrows (9 total)**
-- [ ] `loads` · `reads settings`
-- [ ] main → each of 7 containers (short labels)
+**Arrows (10 total)**
+- [ ] `loads` · `reads settings` · `delegates`
+- [ ] orchestration → each of 7 containers (short labels)
 - [ ] Arrows touch **container border**, not inner boxes
 - [ ] Dashed base→derived inside only; no creates arrows
 
 **Layout**
-- [ ] main.py tall on left; no mega packages wrapper
+- [ ] main.py + orchestration.py stacked on left; no mega packages wrapper
 - [ ] No Stack / A1 / triad-rag
 - [ ] No COLUMN/ROW/Container numbering on the image

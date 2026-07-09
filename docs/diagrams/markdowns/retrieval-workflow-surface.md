@@ -1,5 +1,7 @@
 # Retrieval service — API surface
 
+> **Diagram source of truth** for retrieval service layout. HTTP in `main.py`; ingest/search wiring in `orchestration.py`. Indexer ids: `chroma` / `bm25` / `hybrid` (`vector` is a legacy alias). Parent expansion: `search_expand` (request override: `expand`). See also [`DESIGN.md`](../../DESIGN.md).
+
 Structural reference for diagram generation: **packages, modules, classes, function prototypes, and who calls whom**. No implementations.
 
 Root: `retrieval/app/`
@@ -15,9 +17,9 @@ Root: `retrieval/app/`
 | `settings` | instance | `Settings` — loaded from `env.toml` `[retrieval]` |
 | `Settings` | class | Pydantic settings (paths, backends, allowlists, chunk/rerank/hybrid flags) |
 
-**`settings` fields used elsewhere:** `corpus_dir`, `index_store_dir`, `chunk_size`, `chunk_overlap`, `chunker_name`, `available_chunkers`, `hierarchical_parent_multiplier`, `hierarchical_expand_parent`, `sentence_window_size`, `semantic_breakpoint_percentile`, `semantic_buffer_size`, `available_embedding_models`, `default_embedding_model`, `max_upload_bytes`, `rerank_enabled`, `rerank_model`, `rerank_candidate_multiplier`, `vector_backend`, `node_store_backend`, `embedder_backend`, `reranker_backend`, `sparse_backend`, `hybrid_enabled`, `hybrid_candidate_multiplier`
+**`settings` fields used elsewhere:** `corpus_dir`, `index_store_dir`, `chunk_size`, `chunk_overlap`, `chunker_name`, `available_chunkers`, `hierarchical_parent_multiplier`, `hierarchical_chunk_sizes`, `hierarchical_embed_at`, `sentence_window_size`, `semantic_breakpoint_percentile`, `semantic_buffer_size`, `available_embedding_models`, `default_embedding_model`, `max_upload_bytes`, `rerank_enabled`, `rerank_model`, `rerank_candidate_multiplier`, `search_expand`, `vector_backend`, `node_store_backend`, `embedder_backend`, `reranker_backend`, `sparse_backend`, `hybrid_candidate_multiplier`
 
-**Called from:** `app.main` (everywhere settings are read)
+**Called from:** `app.main`, `app.orchestration` (everywhere settings are read)
 
 ---
 
@@ -29,59 +31,92 @@ Root: `retrieval/app/`
 
 | Symbol | Kind | Notes |
 |--------|------|-------|
-| `RetrieveRequest` | Pydantic model | `query`, `top_k`, `index_id`, `rerank` |
+| `RetrieveRequest` | Pydantic model | `query`, `top_k`, `index_id`, `rerank`, `expand` (optional; default from `settings`) |
 | `RetrievedChunk` | Pydantic model | `chunk_id`, `text`, `score`, `metadata` |
 | `RetrieveResponse` | Pydantic model | `query`, `chunks`, `index_id`, `candidate_count`, `candidates` |
 | `IngestResponse` | Pydantic model | `index_id`, `saved_as`, `chunks_indexed`, `embedding_model`, `chunker`, `indexer`, `ready` |
 | `IndexDescription` | Pydantic model | `description` |
-| `IndexHandles` | dataclass | `chroma: ChromaIndexer`, `bm25: Bm25Indexer` |
-| `INDEXER_CHOICES` | constant | `("vector", "bm25", "hybrid")` |
 | `app` | FastAPI | ASGI app with `lifespan` |
-
-#### Private helpers
-
-| Function | Prototype | Calls |
-|----------|-----------|-------|
-| `_indexer_deps` | `() -> IndexerDeps` | reads `settings` → builds `IndexerDeps(...)` |
-| `_index_handles` | `(app, index_id, *, cache=True) -> IndexHandles` | `make_chroma_indexer(...)`, `make_bm25_indexer(...)`, `make_vector_store(...)`, `make_node_store(...)`, `make_sparse_store(...)` |
-| `_delete_index_storage` | `(handles: IndexHandles) -> None` | `handles.chroma.delete_index()`, `handles.bm25.delete_index()` |
-| `_available_indexers` | `() -> list[str]` | reads `settings.sparse_backend` |
-| `_index_vector_store` | `(index_id, deps) -> BaseVectorStore` | `make_vector_store(index_id, backend=settings.vector_backend, store_root=deps.index_store_dir)` |
-| `_read_indexer_choice` | `(index_id, deps) -> str \| None` | `_index_vector_store(...).try_get_collection()` |
-| `_write_indexer_choice` | `(index_id, deps, indexer: str) -> None` | `_index_vector_store(...)`, `.get_collection()`, `.modify_metadata(...)` |
-| `_search` | `(handles, deps, reranker, query, top_k, *, rerank, mode) -> tuple[list[dict], list[dict]]` | `bm25.search`, `chroma.search`, `node_from_retrieved`, `sparse_hit_from_retrieved`, `combine_hybrid_results`, `reranker.rerank`, `format_retrieved` |
-| `_validate_index_id` | `(index_id: str) -> None` | `validate_index_id(index_id)` |
-| `_preload_embedding_models` | `() -> None` | `make_embedder(model, backend=settings.embedder_backend)` for each `settings.available_embedding_models` |
-| `_bind_embedder` | `(chroma: ChromaIndexer) -> None` | `make_embedder(...)`, `chroma.bind_embedder(...)` |
-| `_ensure_loaded` | `(handles: IndexHandles) -> None` | `handles.chroma.load()`, `handles.bm25.load()`, `_bind_embedder(handles.chroma)` |
 
 #### Lifespan
 
 | Function | Prototype | Calls |
 |----------|-----------|-------|
-| `lifespan` | `(app: FastAPI) -> AsyncIterator[None]` | validates `settings.available_chunkers` ⊆ `CHUNKERS`; `_preload_embedding_models()`; `make_reranker(settings.rerank_model, backend=settings.reranker_backend)`; `_index_handles(app, "default")`; `chroma.load()`, `bm25.load()`, `_bind_embedder(chroma)` |
+| `lifespan` | `(app: FastAPI) -> AsyncIterator[None]` | `startup(app)`; clears `app.state.indices` on shutdown |
 
 #### HTTP routes
 
 | Route | Handler | Calls |
 |-------|---------|-------|
 | `GET /health` | `health()` | — |
-| `GET /indices` | `list_indices(request)` | `list_indices_detailed(deps.index_store_dir)`, `_read_indexer_choice`, `make_sparse_store(...).chunk_count()` |
-| `GET /ingest/options` | `ingest_options()` | `_available_indexers()`, reads `settings` allowlists/defaults/backends |
-| `POST /indices/{index_id}/description` | `set_index_description(...)` | `_validate_index_id`, `write_index_description(...)`, updates `handles.chroma.index_metadata` |
-| `DELETE /indices/{index_id}` | `delete_index(...)` | `_validate_index_id`, `_delete_index_storage(handles)` |
-| `GET /indices/{index_id}/files` | `list_corpus_files(...)` | `_validate_index_id`, `_index_handles`, `handles.chroma.list_corpus_files()` |
-| `DELETE /indices/{index_id}/corpus` | `clear_corpus(...)` | `_validate_index_id`, `_index_handles`, `handles.bm25.delete_by_source(name)`, `handles.chroma.delete_corpus_file(name)` |
-| `DELETE /indices/{index_id}/files/{filename}` | `delete_corpus_file(...)` | `_validate_index_id`, `_index_handles`, `sanitize_corpus_filename(filename)`, `handles.bm25.delete_by_source`, `handles.chroma.delete_corpus_file` |
-| `POST /retrieve` | `retrieve(...)` | `_validate_index_id`, `_index_handles`, `_ensure_loaded`, `_read_indexer_choice`, `_search(..., request.app.state.reranker, ...)` |
-| `POST /ingest` | `ingest(...)` | `_validate_index_id`, `_read_indexer_choice`, `_index_handles`, `save_upload(...)`, `make_embedder(...)`, `make_chunker(...)`, `chunker.chunk_file(saved)`, `handles.chroma.add_chunks(...)` and/or `handles.bm25.add_chunks(...)`, `_index_vector_store(...).create_collection(...)` (bm25-only), `_write_indexer_choice` |
+| `GET /indices` | `get_indices()` | `list_indices()` |
+| `GET /ingest/options` | `ingest_options()` | `available_indexers()`, reads `settings` allowlists/defaults/backends/tuning |
+| `POST /indices/{index_id}/description` | `set_description(...)` | `validate_index_id`, `write_index_description(...)`, updates cached `handles.chroma.index_metadata` |
+| `DELETE /indices/{index_id}` | `delete_index_route(...)` | `delete_index(app, index_id)` |
+| `GET /indices/{index_id}/files` | `list_corpus(...)` | `validate_index_id`, `list_corpus_files(corpus_root(), index_id)` |
+| `DELETE /indices/{index_id}/corpus` | `clear_corpus(...)` | `validate_index_id`, `remove_source` per file, `unlink_corpus_file` |
+| `DELETE /indices/{index_id}/files/{filename}` | `delete_corpus_file(...)` | `validate_index_id`, `sanitize_corpus_filename`, `remove_source`, `unlink_corpus_file` |
+| `POST /retrieve` | `retrieve(...)` | `index_handles`, `ensure_loaded`, `read_indexer_mode`, `search_index(..., reranker=app.state.reranker, expand=body.expand)` |
+| `POST /ingest` | `ingest(...)` | `ingest_file(app, ...)` |
 
 #### CLI
 
 | Function | Prototype | Called from |
 |----------|-----------|-------------|
-| `run` | `(host, port, *, reload=True) -> None` | `main()` |
-| `main` | `(argv=None) -> None` | `__main__` |
+| `main` | `(argv=None) -> None` | `__main__` — `uvicorn.run("app.main:app", port=8101)` |
+
+---
+
+## orchestration (ingest / search wiring)
+
+### `app.orchestration`
+
+#### Types / constants
+
+| Symbol | Kind | Notes |
+|--------|------|-------|
+| `INDEXER_MODES` | constant | `("chroma", "bm25", "hybrid")` |
+| `IndexHandles` | dataclass | `chroma: ChromaIndexer`, `bm25: Bm25Indexer` |
+
+#### Path helpers
+
+| Function | Prototype | Calls |
+|----------|-----------|-------|
+| `store_root` | `() -> Path` | `settings.index_store_dir` |
+| `corpus_root` | `() -> Path` | `settings.corpus_dir` |
+| `validate_index_id` | `(index_id: str) -> None` | `check_index_id` → HTTP 400 |
+
+#### Indexer mode (Chroma collection metadata)
+
+| Function | Prototype | Calls |
+|----------|-----------|-------|
+| `available_indexers` | `() -> list[str]` | `["chroma"]` if `sparse_backend == "none"`, else `INDEXER_MODES` |
+| `read_indexer_mode` | `(index_id) -> str \| None` | `_vector_store(...).try_get_collection()`; normalizes `vector` → `chroma` |
+| `write_indexer_mode` | `(index_id, mode) -> None` | `_vector_store(...).modify_metadata` |
+| `resolve_ingest_mode` | `(index_id, requested) -> str` | locks indexer after first ingest (409 on mismatch) |
+
+#### Handles / lifecycle
+
+| Function | Prototype | Calls |
+|----------|-----------|-------|
+| `index_handles` | `(app, index_id, *, cache=True, chroma_embedder=None) -> IndexHandles` | `make_vector_store`, `make_node_store`, `make_sparse_store`, `make_chroma_indexer`, `make_bm25_indexer` |
+| `ensure_loaded` | `(h: IndexHandles) -> None` | `h.chroma.load()`, `h.bm25.load()`, `_ensure_chroma_embedder` |
+| `startup` | `(app: FastAPI) -> None` | validates `CHUNKERS`; preloads embedders; `make_reranker`; warms `default` index |
+
+#### Search / ingest
+
+| Function | Prototype | Calls |
+|----------|-----------|-------|
+| `search_index` | `(h, *, mode, query, top_k, rerank, reranker, expand=None) -> tuple[list[dict], list[dict]]` | `chroma.search` / `bm25.search` with `expand`; hybrid → `combine_hybrid_results`; optional `reranker.rerank`; `node_from_retrieved`, `format_retrieved` |
+| `ingest_file` | `(app, *, index_id, data, filename, index_description, embedding_model, chunker_name, indexer) -> dict` | `resolve_ingest_mode`, `save_upload`, `make_embedder`, `make_chunker`, `chunk_file`, `_ensure_collection`, `add_chunks` / `remove_source`, `write_indexer_mode` |
+
+#### Index / corpus admin
+
+| Function | Prototype | Calls |
+|----------|-----------|-------|
+| `list_indices` | `() -> dict` | `list_indices_detailed`, `read_indexer_mode`, sparse `chunk_count` for bm25-only |
+| `delete_index` | `(app, index_id) -> None` | `index_handles`, `chroma.delete_index`, `bm25.delete_index` |
+| `remove_source` | `(app, index_id, source) -> None` | `chroma.remove_source`, `bm25.remove_source` |
 
 ---
 
@@ -91,15 +126,23 @@ Root: `retrieval/app/`
 
 | Function | Prototype | Called from |
 |----------|-----------|-------------|
-| `save_upload` | `(data: bytes, original_filename: str \| None, corpus_dir: Path, *, max_bytes: int) -> Path` | `app.main.ingest` |
+| `save_upload` | `(data: bytes, original_filename: str \| None, corpus_dir: Path, *, max_bytes: int) -> Path` | `orchestration.ingest_file` |
 
 **Calls:** `sanitize_corpus_filename(original_filename)`
+
+### `app.ingest.corpus`
+
+| Function | Prototype | Called from |
+|----------|-----------|-------------|
+| `corpus_dir` | `(corpus_root: Path, index_id: str) -> Path` | `orchestration.ingest_file`, `list_corpus_files`, `unlink_corpus_file` |
+| `list_corpus_files` | `(corpus_root: Path, index_id: str) -> list[str]` | `main.list_corpus`, `main.clear_corpus`, `orchestration` (indirect) |
+| `unlink_corpus_file` | `(corpus_root: Path, index_id: str, filename: str) -> str` | `main.clear_corpus`, `main.delete_corpus_file` |
 
 ### `app.ingest.filename_sanitizer`
 
 | Function | Prototype | Called from |
 |----------|-----------|-------------|
-| `sanitize_corpus_filename` | `(original: str \| None) -> str` | `app.ingest.upload.save_upload`, `app.main.delete_corpus_file` |
+| `sanitize_corpus_filename` | `(original: str \| None) -> str` | `upload.save_upload`, `main.delete_corpus_file` |
 
 ---
 
@@ -112,7 +155,7 @@ Root: `retrieval/app/`
 | `CHUNKERS` | constant | `frozenset({"simple", "hierarchical", "markdown", "sentence_window", "semantic"})` |
 | `make_chunker` | function | `(name: str, *, chunk_size, chunk_overlap, embed_model=None, hierarchical_parent_multiplier=3, sentence_window_size=3, semantic_breakpoint_percentile=95, semantic_buffer_size=1) -> BaseChunker` |
 
-**Called from:** `app.main.ingest`, `app.main.lifespan` (validates against `CHUNKERS`)
+**Called from:** `orchestration.ingest_file`, `orchestration.startup` (validates against `CHUNKERS`)
 
 **`make_chunker` returns:** `SimpleChunker` \| `MarkdownChunker` \| `HierarchicalChunker` \| `SentenceWindowChunker` \| `SemanticChunker`
 
@@ -124,7 +167,7 @@ Root: `retrieval/app/`
 | `BaseChunker` | class | `chunk_file(path: Path) -> ChunkSet` |
 | | | `chunk_corpus(corpus_dir: Path) -> ChunkSet` |
 
-**`chunk_file` called from:** `app.main.ingest`
+**`chunk_file` called from:** `orchestration.ingest_file`
 
 ### Implementations (subclass `BaseChunker`)
 
@@ -149,7 +192,7 @@ Root: `retrieval/app/`
 | `EMBEDDER_BACKENDS` | constant | `frozenset({"huggingface"})` |
 | `make_embedder` | function | `(model_name: str, *, backend: str) -> BaseEmbedder` |
 
-**Called from:** `app.main._preload_embedding_models`, `app.main._bind_embedder`, `app.main.ingest`
+**Called from:** `orchestration.startup`, `orchestration.ingest_file`, `orchestration.index_handles` / `_ensure_chroma_embedder`
 
 **Returns:** `HuggingFaceEmbedder` (cached per model name)
 
@@ -176,8 +219,8 @@ Root: `retrieval/app/`
 
 | Function | Prototype | Called from |
 |----------|-----------|-------------|
-| `make_chroma_indexer` | `(index_id, deps, *, vector_store, node_store) -> ChromaIndexer` | `app.main._index_handles` |
-| `make_bm25_indexer` | `(index_id, deps, *, sparse_store) -> Bm25Indexer` | `app.main._index_handles` |
+| `make_chroma_indexer` | `(index_id, *, embedding_store, lookup_store, embedder=None) -> ChromaIndexer` | `orchestration.index_handles` |
+| `make_bm25_indexer` | `(index_id, *, keyword_store, context_store) -> Bm25Indexer` | `orchestration.index_handles` |
 
 ### `app.indexers.base_indexer`
 
@@ -204,7 +247,7 @@ chunk_count() -> int
 search(query: str, top_k: int, *, rerank: bool | None = None) -> list[dict]
 ```
 
-**`validate_index_id` called from:** `app.main._validate_index_id`, `ChromaIndexer.__init__`, `Bm25Indexer.__init__`
+**`validate_index_id` called from:** `orchestration.validate_index_id`, `ChromaIndexer.__init__`, `Bm25Indexer.__init__`, `ingest.corpus.corpus_dir`
 
 ### `app.indexers.chroma_indexer`
 
@@ -245,7 +288,7 @@ search(query: str, top_k: int, *, rerank: bool | None = None) -> list[dict]
 | `make_node_store` | function | `(index_id, *, backend, store_root) -> BaseNodeStore` |
 | `make_sparse_store` | function | `(index_id, *, backend, store_root) -> BaseSparseStore` |
 
-**Called from:** `app.main._index_handles`, `app.main._index_vector_store`, `app.main.list_indices`
+**Called from:** `orchestration.index_handles`, `orchestration._vector_store`, `orchestration.list_indices`, `main.set_description`
 
 **Returns:**
 
@@ -266,8 +309,8 @@ search(query: str, top_k: int, *, rerank: bool | None = None) -> list[dict]
 
 | Symbol | Prototype | Called from |
 |--------|-----------|-------------|
-| `list_indices_detailed` | `(store_root: Path) -> list[dict]` | `app.main.list_indices` |
-| `write_index_description` | `(index_id, description, store_root) -> dict` | `app.main.set_index_description` |
+| `list_indices_detailed` | `(store_root: Path) -> list[dict]` | `orchestration.list_indices` |
+| `write_index_description` | `(index_id, description, store_root) -> dict` | `main.set_description` |
 | `ChromaVectorStore` | implements `BaseVectorStore` | `make_vector_store`, `write_index_description` |
 
 ### `app.stores.base_node_store`
@@ -302,28 +345,15 @@ search(query: str, top_k: int, *, rerank: bool | None = None) -> list[dict]
 
 ## hybrid
 
-### `app.hybrid.combine`
+### `app.hybrid` (`__init__.py` — single module)
 
 | Function | Prototype | Called from |
 |----------|-----------|-------------|
-| `combine_hybrid_results` | `(vector_hits: list[NodeWithScore], sparse_hits: list, *, limit: int, rank_fusion_k=60) -> list[NodeWithScore]` | `app.main._search` |
-
-**Calls:** `reciprocal_rank_fusion(...)`, `merge_hybrid_hits(...)`
-
-### `app.hybrid.merge_hits`
-
-| Function | Prototype | Called from |
-|----------|-----------|-------------|
-| `node_from_retrieved` | `(hit: dict) -> NodeWithScore` | `app.main._search` |
-| `sparse_hit_from_retrieved` | `(hit: dict) -> SparseHit` | `app.main._search` |
-| `format_retrieved` | `(hit: NodeWithScore) -> dict` | `app.main._search` |
-| `merge_hybrid_hits` | `(vector_hits, sparse_hits, merged_ids) -> list[NodeWithScore]` | `combine_hybrid_results` |
-
-### `app.hybrid.rank_fusion`
-
-| Function | Prototype | Called from |
-|----------|-----------|-------------|
-| `reciprocal_rank_fusion` | `(rankings: list[list[str]], *, k=60) -> list[str]` | `combine_hybrid_results` |
+| `combine_hybrid_results` | `(vector_hits, sparse_hits, *, limit, rank_fusion_k=60) -> list[NodeWithScore]` | `orchestration.search_index` |
+| `node_from_retrieved` | `(hit: dict) -> NodeWithScore` | `orchestration.search_index` |
+| `format_retrieved` | `(hit: NodeWithScore) -> dict` | `orchestration.search_index` |
+| `_reciprocal_rank_fusion` | `(rankings, *, k=60) -> list[str]` | `combine_hybrid_results` (internal) |
+| `_merge_hybrid_hits` | `(vector_hits, sparse_hits, merged_ids) -> list[NodeWithScore]` | `combine_hybrid_results` (internal) |
 
 ---
 
@@ -334,7 +364,7 @@ search(query: str, top_k: int, *, rerank: bool | None = None) -> list[dict]
 | Symbol | Prototype | Called from |
 |--------|-----------|-------------|
 | `RERANKER_BACKENDS` | `frozenset({"cross_encoder"})` | — |
-| `make_reranker` | `(model_name: str, *, backend: str) -> BaseReranker` | `app.main.lifespan` |
+| `make_reranker` | `(model_name: str, *, backend: str) -> BaseReranker` | `orchestration.startup` |
 
 **Returns:** `CrossEncoderReranker` (cached per model name)
 
@@ -344,7 +374,7 @@ search(query: str, top_k: int, *, rerank: bool | None = None) -> list[dict]
 |-------|-----------|
 | `BaseReranker` | `model_name` (property), `rerank(hits, query, *, top_n) -> list[NodeWithScore]` |
 
-**`rerank` called from:** `app.main._search` via `request.app.state.reranker`
+**`rerank` called from:** `orchestration.search_index` via `app.state.reranker`
 
 ### `app.rerankers.cross_encoder_reranker`
 
@@ -354,32 +384,36 @@ search(query: str, top_k: int, *, rerank: bool | None = None) -> list[dict]
 
 ---
 
-## Call summary (main → packages)
+## Call summary (main → orchestration → packages)
 
 ```
 lifespan
-  → settings, CHUNKERS, make_embedder, make_reranker, _index_handles, ChromaIndexer.load, Bm25Indexer.load, bind_embedder
+  → orchestration.startup
+       → settings, CHUNKERS, make_embedder, make_reranker, index_handles, load, _ensure_chroma_embedder
 
-_index_handles
+main.ingest / main.retrieve / corpus routes
+  → orchestration (ingest_file, search_index, list_indices, delete_index, remove_source, …)
+
+index_handles
   → make_vector_store, make_node_store, make_sparse_store, make_chroma_indexer, make_bm25_indexer
 
-ingest
-  → validate_index_id, save_upload, make_embedder, make_chunker, BaseChunker.chunk_file,
-     ChromaIndexer.add_chunks, Bm25Indexer.add_chunks, ChromaVectorStore.create_collection (bm25-only)
+ingest_file
+  → validate_index_id, resolve_ingest_mode, save_upload, make_embedder, make_chunker, chunk_file,
+     ChromaIndexer.add_chunks / remove_source, Bm25Indexer.add_chunks / remove_source,
+     _ensure_collection, write_indexer_mode
 
-retrieve
-  → _index_handles, _ensure_loaded, _read_indexer_choice, _search
-       → ChromaIndexer.search | Bm25Indexer.search | combine_hybrid_results | BaseReranker.rerank
-       → node_from_retrieved, sparse_hit_from_retrieved, format_retrieved
+search_index
+  → read_indexer_mode (via main.retrieve), ChromaIndexer.search | Bm25Indexer.search (expand=…)
+       → combine_hybrid_results (hybrid) | BaseReranker.rerank (optional)
+       → node_from_retrieved, format_retrieved
 
 delete_index / corpus / files
-  → ChromaIndexer.delete_index | delete_corpus_file | list_corpus_files
-  → Bm25Indexer.delete_index | delete_by_source
+  → remove_source, unlink_corpus_file, ChromaIndexer.delete_index, Bm25Indexer.delete_index
 
 list_indices
-  → list_indices_detailed, _read_indexer_choice, make_sparse_store.chunk_count
+  → list_indices_detailed, read_indexer_mode, make_sparse_store.chunk_count
 
-set_index_description
+set_description
   → write_index_description
 ```
 
@@ -395,6 +429,6 @@ set_index_description
 | `VECTOR_BACKENDS` | `store_factory` | chroma |
 | `NODE_STORE_BACKENDS` | `store_factory` | json, sqlite |
 | `SPARSE_BACKENDS` | `store_factory` | none, json_bm25, sqlite_bm25 |
-| `INDEXER_CHOICES` | `main` | vector, bm25, hybrid (filtered by `sparse_backend`) |
+| `INDEXER_MODES` | `orchestration` | chroma, bm25, hybrid (`available_indexers` filters when `sparse_backend == "none"`) |
 
 **Env allowlists** (from `settings`): `available_chunkers`, `available_embedding_models`, `*_backend` strings.

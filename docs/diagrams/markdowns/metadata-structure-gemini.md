@@ -20,7 +20,7 @@ Three **stacked tiers** (top → bottom). Each tier is one bordered box with a h
 │  ┌─ Service config (env.toml · startup) ─────────────────────────────┐  │
 │  │ sparse_backend · node_store_backend · vector_backend              │  │
 │  │ rerank_enabled · rerank_model · rerank_candidate_multiplier     │  │
-│  │ hybrid_candidate_multiplier · sentence_window_size · …          │  │
+│  │ search_expand · hybrid_candidate_multiplier · sentence_window…  │  │
 │  │ muted: service-wide — not stored per index                        │  │
 │  └───────────────────────────────────────────────────────────────────┘  │
 │                                                                         │
@@ -67,6 +67,7 @@ Muted subtitle: *service-wide — not per index*
 | `rerank_enabled` | default rerank on/off |
 | `rerank_model` | cross-encoder model name |
 | `rerank_candidate_multiplier` | candidate pool size vs `top_k` |
+| `search_expand` | default parent expansion on search (`expand` on `POST /retrieve` overrides) |
 | `hybrid_candidate_multiplier` | RRF candidate pool |
 | `sentence_window_size` | only for `sentence_window` chunker |
 
@@ -82,12 +83,12 @@ Header: **Index metadata** · subtitle: *Chroma collection · one per `index_id`
 |-----|----------------|
 | `embedding_model` | e.g. `all-MiniLM-L6-v2` — locked on re-ingest |
 | `chunker` | `simple` · `hierarchical` · section-based (`markdown`) · `sentence_window` · `semantic` — locked on re-ingest |
-| `indexer` | `vector` · `bm25` · `hybrid` — set by `_write_indexer_choice`; locked on re-ingest |
+| `indexer` | `chroma` · `bm25` · `hybrid` — set by `write_indexer_mode`; locked on re-ingest (`vector` is legacy alias → `chroma`) |
 | `description` | optional string (max 500 chars); `write_index_description` |
 
 Muted lines inside box:
 - *Written:* `ChromaVectorStore.create_collection` / `modify_metadata`
-- *Read:* `GET /indices`, `_read_indexer_choice` on `POST /retrieve`
+- *Read:* `GET /indices`, `read_indexer_mode` on `POST /retrieve`
 
 **Note for `bm25`-only indexes:** Chroma collection may exist with metadata but **zero** vector chunks.
 
@@ -160,10 +161,10 @@ Vertical stack of bordered boxes (top to bottom):
 1) SERVICE CONFIG (muted subtitle: service-wide, not per index)
    env.toml at startup: sparse_backend, node_store_backend, vector_backend,
    embedder_backend, rerank_enabled, rerank_model, rerank_candidate_multiplier,
-   hybrid_candidate_multiplier, sentence_window_size
+   search_expand, hybrid_candidate_multiplier, sentence_window_size
 
 2) INDEX METADATA (subtitle: Chroma collection, one per index_id)
-   Keys: embedding_model, chunker, indexer (vector|bm25|hybrid), description
+   Keys: embedding_model, chunker, indexer (chroma|bm25|hybrid), description
    Notes inside box: set on first ingest; indexer locked on re-ingest
    Read by GET /indices and POST /retrieve
 

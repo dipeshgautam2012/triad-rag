@@ -1,4 +1,5 @@
 from pathlib import Path
+from typing import Literal
 import tomllib
 
 from pydantic import Field, field_validator, model_validator
@@ -18,7 +19,11 @@ def _load_section() -> dict:
     except (OSError, tomllib.TOMLDecodeError):
         return {}
     section = data.get("retrieval")
-    return section if isinstance(section, dict) else {}
+    if not isinstance(section, dict):
+        return {}
+    if "search_expand" not in section and "hierarchical_expand_parent" in section:
+        section = {**section, "search_expand": section["hierarchical_expand_parent"]}
+    return section
 
 
 class Settings(BaseSettings):
@@ -33,7 +38,9 @@ class Settings(BaseSettings):
     chunker_name: str
     available_chunkers: list[str]
     hierarchical_parent_multiplier: int = Field(ge=2, le=16)
-    hierarchical_expand_parent: bool
+    hierarchical_chunk_sizes: list[int] | None = None
+    hierarchical_embed_at: int | Literal["leaves"] = "leaves"
+    search_expand: bool
     sentence_window_size: int = Field(ge=1, le=20)
     semantic_breakpoint_percentile: int = Field(ge=0, le=100)
     semantic_buffer_size: int = Field(ge=1, le=10)

@@ -1,11 +1,15 @@
 """
-Streamlit UI for retrieval: ingest and query by API URL and ``index_id``.
+Index UI — ingest documents and test retrieval by API URL and ``index_id``.
 
 ``index_id`` = logical corpus (``default`` = files in corpus root; else ``corpus/{index_id}/``).
 
-Run from ``triad-rag/retrieval``::
+Run from ``triad-rag``::
 
-    streamlit run ingester_ui.py
+    streamlit run retrieval/ui/index.py
+
+Or from ``triad-rag/retrieval``::
+
+    streamlit run ui/index.py
 
 Optional: ``export RETRIEVAL_API_URL=http://127.0.0.1:8101``
 """
@@ -20,7 +24,8 @@ DEFAULT_API = os.environ.get("RETRIEVAL_API_URL", "http://127.0.0.1:8101")
 
 # Colored badges for the indexer recorded in index metadata.
 _INDEXER_BADGES = {
-    "vector": ":blue-badge[:material/scatter_plot: vector]",
+    "chroma": ":blue-badge[:material/scatter_plot: chroma]",
+    "vector": ":blue-badge[:material/scatter_plot: chroma]",  # legacy metadata
     "bm25": ":orange-badge[:material/manage_search: bm25]",
     "hybrid": ":violet-badge[:material/hub: hybrid]",
 }
@@ -28,6 +33,11 @@ _INDEXER_BADGES = {
 
 def _indexer_badge(name: str) -> str:
     return _INDEXER_BADGES.get(name, f":gray-badge[{name}]")
+
+
+def _opt_bool(opts: dict[str, object], key: str, default: bool) -> bool:
+    val = opts.get(key)
+    return val if isinstance(val, bool) else default
 
 
 @st.cache_data(ttl=15)
@@ -40,6 +50,17 @@ def _fetch_ingest_options(api_base: str) -> tuple[dict[str, object], str | None]
         return ({}, f"HTTP {r.status_code}: {r.text[:200]}")
     data = r.json()
     return (data if isinstance(data, dict) else {}, None)
+
+
+def _render_server_config(opts: dict[str, object]) -> None:
+    if not opts:
+        return
+    with st.expander("Server config (`env.toml`)", icon=":material/tune:", expanded=False):
+        st.caption(
+            "Edit `[retrieval]` in `env.toml` and restart retrieval to change these. "
+            "Chunk tuning applies on ingest; search defaults apply when a request omits expand/rerank."
+        )
+        st.json(opts)
 
 
 @st.cache_data(ttl=15)
@@ -123,10 +144,18 @@ def main() -> None:
         st.warning(f"Could not load `GET /indices` — list may be incomplete. ({idx_err})")
     if opts_err:
         st.warning(f"Could not load `GET /ingest/options`. ({opts_err})")
+    else:
+        _render_server_config(ingest_opts)
 
+    st.divider()
+    if not listed:
+        st.info(
+            "No saved indexes yet. Enable **Use a custom index_id** below to ingest your first "
+            "(e.g. `default` for the corpus root)."
+        )
     use_custom = st.checkbox(
         "Use a custom index_id (not only from the list)",
-        value=False,
+        value=not bool(listed),
         help="For ids that are not in GET /indices yet (e.g. before first ingest). "
         "Rules: letters, digits, underscore, hyphen, 1–64 chars.",
     )
@@ -137,10 +166,12 @@ def main() -> None:
             help="`default` = corpus root; otherwise files live under `corpus/{index_id}/`.",
             key="index_id_input",
         ).strip() or "default"
+    elif not listed:
+        index_id = ""
     else:
         c_sel, c_ref = st.columns([3, 1], vertical_alignment="bottom")
         with c_sel:
-            index_ids = [str(r["index_id"]) for r in listed] or ["default"]
+            index_ids = [str(r["index_id"]) for r in listed]
             default_i = index_ids.index("default") if "default" in index_ids else 0
             index_id = st.selectbox(
                 "Saved index",
@@ -158,6 +189,9 @@ def main() -> None:
                 _fetch_indices.clear()
                 _fetch_ingest_options.clear()
                 st.rerun()
+
+    if not index_id:
+        st.stop()
 
     rows_by_id = {str(r["index_id"]): r for r in listed}
     existing_ids = set(rows_by_id.keys())
@@ -177,11 +211,13 @@ def main() -> None:
         st.caption(f"**Index store directory:** `{index_store_dir}`")
 
     if snap:
-        idxr = str(snap.get("indexer") or "").strip() or "vector"
+        idxr = str(snap.get("indexer") or "").strip() or "chroma"
         emb = str(snap.get("embedding_model") or "").strip()
         chunker = str(snap.get("chunker") or "").strip()
+        chunks_raw = snap.get("chunks", 0)
+        chunk_count = chunks_raw if isinstance(chunks_raw, int) else 0
         c1, c2, c3 = st.columns(3)
-        c1.metric("Chunks", int(snap.get("chunks") or 0))
+        c1.metric("Chunks", chunk_count)
         c2.metric("Indexer", idxr)
         c3.metric("Chunker", chunker or "—")
         badges = [_indexer_badge(idxr)]
@@ -192,12 +228,21 @@ def main() -> None:
         st.markdown(" ".join(badges))
         corpus_loc = "corpus root" if index_id == "default" else f"corpus/{index_id}/"
         st.caption(f"**Corpus:** `{corpus_loc}`")
-    elif use_custom:
-        st.caption("Custom `index_id`: details appear here after the first successful ingest.")
+    elif index_id:
+        st.session_state.setdefault("ingest_desc_new", "")
+        if st.session_state.get("ingest_custom_id_for_desc") != index_id:
+            st.session_state["ingest_custom_id_for_desc"] = index_id
+            st.session_state["ingest_desc_new"] = ""
+        st.text_area(
+            "Description for the new index (optional)",
+            height=100,
+            key="ingest_desc_new",
+            help="Stored on the Chroma collection at first ingest. Max 500 chars.",
+        )
     else:
-        st.caption("This index has no saved data yet. Ingest a document below.")
+        st.caption("Select a saved index above.")
 
-    if not use_custom and snap:
+    if snap:
         st.subheader(":material/notes: Index description")
         desc_saved = str(snap.get("description") or "").strip()
 
@@ -316,11 +361,11 @@ def main() -> None:
             chunkers = []
         chunkers = [str(c) for c in chunkers if str(c).strip()]
         default_chunker = str(ingest_opts.get("default_chunker") or "").strip()
-        available_indexers = ingest_opts.get("indexers") or ["vector"]
+        available_indexers = ingest_opts.get("indexers") or ["chroma"]
         if not isinstance(available_indexers, list):
-            available_indexers = ["vector"]
+            available_indexers = ["chroma"]
         available_indexers = [str(i) for i in available_indexers if str(i).strip()]
-        default_indexer = str(ingest_opts.get("default_indexer") or "vector").strip()
+        default_indexer = str(ingest_opts.get("default_indexer") or "chroma").strip()
 
         if is_new_index:
             st.markdown(":material/tune: **Index configuration** — set at first ingest, locked afterward.")
@@ -333,10 +378,10 @@ def main() -> None:
                 )
                 selected_indexer = st.selectbox(
                     "Indexer",
-                    options=available_indexers or ["vector"],
+                    options=available_indexers or ["chroma"],
                     index=idx_default_i if available_indexers else 0,
                     disabled=not available_indexers,
-                    help="vector = dense embeddings · bm25 = keyword · hybrid = both. "
+                    help="chroma = dense embeddings · bm25 = keyword · hybrid = both. "
                     "Queries automatically use this choice (read from index metadata).",
                 )
             with col_chk:
@@ -370,7 +415,7 @@ def main() -> None:
                     options=embedding_models or [default_embedding or "(none configured)"],
                     index=emb_default_i if embedding_models else 0,
                     disabled=not embedding_models,
-                    help="Used to embed chunks for vector/hybrid search"
+                    help="Used to embed chunks for chroma/hybrid search"
                     + (
                         "; with the semantic chunker it also determines chunk boundaries."
                         if selected_chunker == "semantic"
@@ -381,7 +426,7 @@ def main() -> None:
                 selected_embedding = ""
                 st.caption("No embedding model needed — `bm25` indexes keywords, not embeddings.")
         else:
-            locked_indexer = str(snap.get("indexer") or "vector").strip() or "vector"
+            locked_indexer = str(snap.get("indexer") or "chroma").strip() or "chroma"
             locked_badges = [_indexer_badge(locked_indexer)]
             locked_badges.append(f":gray-badge[:material/content_cut: {snap.get('chunker', '')}]")
             if locked_indexer != "bm25":
@@ -392,18 +437,6 @@ def main() -> None:
             selected_indexer = ""
             selected_embedding = ""
             selected_chunker = ""
-
-        if use_custom:
-            st.session_state.setdefault("ingest_desc_new", "")
-            if st.session_state.get("ingest_custom_id_for_desc") != index_id:
-                st.session_state["ingest_custom_id_for_desc"] = index_id
-                st.session_state["ingest_desc_new"] = ""
-            st.text_area(
-                "Description for the new index (optional)",
-                height=100,
-                key="ingest_desc_new",
-                help="Stored on the Chroma collection at first ingest. Max 500 chars.",
-            )
 
         uploaded = st.file_uploader(
             "Document",
@@ -495,54 +528,57 @@ def main() -> None:
             use_container_width=True,
             key="btn_ingest",
         ):
-            suffix = (uploaded.name or "").lower().split(".")[-1]
-            if suffix not in ("txt", "pdf"):
-                st.error("Only .txt and .pdf are allowed.")
+            if uploaded is None:
+                st.error("Choose a file first.")
             else:
-                files = {
-                    "file": (
-                        uploaded.name,
-                        uploaded.getvalue(),
-                        uploaded.type or "application/octet-stream",
-                    )
-                }
-                if use_custom:
-                    data = {
-                        "index_id": index_id,
-                        "index_description": st.session_state.get("ingest_desc_new", ""),
-                    }
+                suffix = (uploaded.name or "").lower().split(".")[-1]
+                if suffix not in ("txt", "pdf"):
+                    st.error("Only .txt and .pdf are allowed.")
                 else:
-                    existing_desc = str((rows_by_id.get(index_id) or {}).get("description") or "")
-                    data = {"index_id": index_id, "index_description": existing_desc}
-                if is_new_index and selected_embedding:
-                    data["embedding_model"] = selected_embedding
-                if is_new_index and selected_chunker:
-                    data["chunker_name"] = selected_chunker
-                if is_new_index and selected_indexer:
-                    data["indexer"] = selected_indexer
-                try:
-                    with st.spinner("POST /ingest — uploading and rebuilding index…"):
-                        r = httpx.post(
-                            f"{base}/ingest",
-                            files=files,
-                            data=data,
-                            timeout=httpx.Timeout(600.0),
+                    files = {
+                        "file": (
+                            uploaded.name,
+                            uploaded.getvalue(),
+                            uploaded.type or "application/octet-stream",
                         )
-                except httpx.RequestError as e:
-                    st.error(f"Request failed: {e}")
-                else:
-                    if r.status_code >= 400:
-                        st.error(f"HTTP {r.status_code}: {r.text}")
+                    }
+                    if use_custom:
+                        data = {
+                            "index_id": index_id,
+                            "index_description": st.session_state.get("ingest_desc_new", ""),
+                        }
                     else:
-                        _fetch_indices.clear()
-                        _fetch_ingest_options.clear()
-                        _fetch_corpus_files.clear()
-                        st.success("Ingest complete.", icon=":material/check_circle:")
-                        st.json(r.json())
+                        existing_desc = str((rows_by_id.get(index_id) or {}).get("description") or "")
+                        data = {"index_id": index_id, "index_description": existing_desc}
+                    if is_new_index and selected_embedding:
+                        data["embedding_model"] = selected_embedding
+                    if is_new_index and selected_chunker:
+                        data["chunker_name"] = selected_chunker
+                    if is_new_index and selected_indexer:
+                        data["indexer"] = selected_indexer
+                    try:
+                        with st.spinner("POST /ingest — uploading and rebuilding index…"):
+                            r = httpx.post(
+                                f"{base}/ingest",
+                                files=files,
+                                data=data,
+                                timeout=httpx.Timeout(600.0),
+                            )
+                    except httpx.RequestError as e:
+                        st.error(f"Request failed: {e}")
+                    else:
+                        if r.status_code >= 400:
+                            st.error(f"HTTP {r.status_code}: {r.text}")
+                        else:
+                            _fetch_indices.clear()
+                            _fetch_ingest_options.clear()
+                            _fetch_corpus_files.clear()
+                            st.success("Ingest complete.", icon=":material/check_circle:")
+                            st.json(r.json())
 
     with tab_query:
         st.header(":material/manage_search: Search")
-        recorded_indexer = str((snap or {}).get("indexer") or "vector").strip()
+        recorded_indexer = str((snap or {}).get("indexer") or "chroma").strip()
         st.markdown(
             f"Searches index `{index_id}` with its recorded indexer "
             f"{_indexer_badge(recorded_indexer)} — embedding model and chunker are "
@@ -553,7 +589,7 @@ def main() -> None:
             placeholder="What is RAG?",
             key="query_input",
         )
-        col_k, col_rr = st.columns([3, 1], vertical_alignment="bottom")
+        col_k, col_ex, col_rr = st.columns([3, 1, 1], vertical_alignment="bottom")
         with col_k:
             top_k = st.slider(
                 "Chunks to return (top_k)",
@@ -562,8 +598,19 @@ def main() -> None:
                 value=5,
                 key="top_k_slider",
             )
+        with col_ex:
+            use_expand = st.checkbox(
+                "Expand context",
+                value=_opt_bool(ingest_opts, "search_expand", True),
+                key="expand_checkbox",
+                help="Return wider context (sentence window, hierarchical parent) when available.",
+            )
         with col_rr:
-            use_rerank = st.checkbox("Rerank results", value=False, key="rerank_checkbox")
+            use_rerank = st.checkbox(
+                "Rerank results",
+                value=_opt_bool(ingest_opts, "rerank_enabled", False),
+                key="rerank_checkbox",
+            )
 
         if st.button(
             "Retrieve",
@@ -582,6 +629,7 @@ def main() -> None:
                             "top_k": int(top_k),
                             "index_id": index_id,
                             "rerank": use_rerank,
+                            "expand": use_expand,
                         },
                         timeout=httpx.Timeout(120.0),
                     )

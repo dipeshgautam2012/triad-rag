@@ -2,7 +2,7 @@
 
 Retrieval finds the passages most relevant to a question. Two decisions matter:
 
-1. **Indexer** (chosen at **first upload**, stored per collection): `vector`, `bm25`, or `hybrid`
+1. **Indexer** (chosen at **first upload**, stored per collection): `chroma`, `bm25`, or `hybrid`
 2. **Rerank** (chosen at **query time** in the UI): re-score a wider candidate list for better ordering
 
 Search mode is **not** switched per query — the collection remembers its indexer.
@@ -16,7 +16,7 @@ Search mode is **not** switched per query — the collection remembers its index
 ```mermaid
 flowchart LR
   Q[Question] --> M{Collection indexer}
-  M -->|vector| V[Meaning search]
+  M -->|chroma| V[Meaning search]
   M -->|bm25| B[Keyword search]
   M -->|hybrid| H[Both searches]
   H --> F[Merge rankings]
@@ -70,7 +70,7 @@ Keyword list:  1st chunk_B, 2nd chunk_A, 3rd chunk_D
 Fused list:    chunk_A, chunk_B, chunk_C, chunk_D, …
 ```
 
-**Step 5 — Rerank (optional).** If the rerank checkbox is on, a cross-encoder reads the **fused** list (not the raw vector or BM25 lists separately) and re-scores each `(question, passage)` pair. The best `top_k` after reranking become final `chunks`. The fused list **before** rerank is returned as `candidates` in the API (Ingester UI shows this in **Candidate pool**).
+**Step 5 — Rerank (optional).** If the rerank checkbox is on, a cross-encoder reads the **fused** list (not the raw chroma or BM25 lists separately) and re-scores each `(question, passage)` pair. The best `top_k` after reranking become final `chunks`. The fused list **before** rerank is returned as `candidates` in the API (Index UI shows this in **Candidate pool**).
 
 If rerank is off, the top `top_k` from the fused list are returned directly. The full fused pool may still appear as `candidates`.
 
@@ -89,16 +89,16 @@ Rerank never runs instead of RRF on hybrid — order is always: **vector + BM25 
 
 | Strategy | What it matches | Index built at ingest | Main library |
 |----------|-----------------|----------------------|--------------|
-| **vector** | Similar *meaning* | Embeddings in Chroma | `chromadb`, `llama_index` |
+| **chroma** | Similar *meaning* | Embeddings in Chroma | `chromadb`, `llama_index` |
 | **bm25** | Important *words* | BM25 sparse index | `bm25s` |
 | **hybrid** | Both | Vector + BM25 | Chroma + `bm25s` + custom RRF |
 | **rerank** (add-on) | Query + passage together | Pre-loaded cross-encoder model | `sentence-transformers` via LlamaIndex |
 
-**Embedding model** (vector / hybrid): `sentence-transformers` through `llama_index.embeddings.huggingface` (default: `all-MiniLM-L6-v2`).
+**Embedding model** (chroma / hybrid): `sentence-transformers` through `llama_index.embeddings.huggingface` (default: `all-MiniLM-L6-v2`).
 
 ---
 
-## vector (meaning-based)
+## chroma (meaning-based)
 
 **How it works**
 
@@ -173,7 +173,7 @@ RRF does not add scores from different scales; it rewards chunks that appear nea
 
 **Good when:** you want both paraphrase matching (vector) and exact-term matching (keyword).
 
-**Code path:** `main._search` → `chroma.search` + `bm25.search` → `combine_hybrid_results` → optional `reranker.rerank`.
+**Code path:** `orchestration.search_index` → `chroma.search` + `bm25.search` → `combine_hybrid_results` → optional `reranker.rerank`.
 
 **Config:** `hybrid_candidate_multiplier` (pool size before RRF trim); `rerank_candidate_multiplier` (may widen pool when rerank is on).
 
@@ -181,7 +181,7 @@ RRF does not add scores from different scales; it rewards chunks that appear nea
 
 ## rerank (optional second pass)
 
-Rerank is **not** a third indexer. It is a checkbox at query time (Ingester UI and Chat UI).
+Rerank is **not** a third indexer. It is a checkbox at query time (Index UI and Chat UI), or a default in `env.toml` (`rerank_enabled`).
 
 On **hybrid**, rerank runs **after RRF** on the fused list — see [Hybrid at a glance](#hybrid-at-a-glance-rrf-and-rerank).
 
@@ -201,7 +201,7 @@ Final results:              [B, A, C]
 
 **Good when:** quality matters more than speed, or first-pass ordering is noisy.
 
-**Ingester UI:** shows the pre-rerank pool in a **Candidate pool** expander (`candidates` in the API).
+**Index UI:** shows the pre-rerank pool in a **Candidate pool** expander (`candidates` in the API).
 
 **Code path:** `CrossEncoderReranker` → LlamaIndex `SentenceTransformerRerank`.
 
@@ -213,11 +213,11 @@ Final results:              [B, A, C]
 
 | Collection indexer | Rerank off | Rerank on |
 |--------------------|------------|-----------|
-| **vector** | Top `top_k` by embedding similarity | Wider vector pool → cross-encoder → top `top_k` |
-| **bm25** | Top `top_k` by keyword score | Wider BM25 pool → cross-encoder → top `top_k` |
-| **hybrid** | RRF merge → top `top_k`; API returns fused pool as `candidates` | Wider pool → vector + BM25 → RRF → cross-encoder on fused list → top `top_k`; `candidates` = pre-rerank fused pool |
+| **chroma** | Top `top_k` by embedding similarity; optional **expand** | Wider chroma pool → optional expand → cross-encoder → top `top_k` |
+| **bm25** | Top `top_k` by keyword score; optional **expand** | Wider BM25 pool → optional expand → cross-encoder → top `top_k` |
+| **hybrid** | RRF merge → top `top_k`; API returns fused pool as `candidates` | Wider pool → chroma + BM25 → RRF → optional expand → cross-encoder on fused list → top `top_k`; `candidates` = pre-rerank fused pool |
 
-**Hierarchical chunker + vector or hybrid:** if the node store has parents and `hierarchical_expand_parent = true`, the **vector leg** may replace child hits with a parent when **`ratio > 0.4`**, where `ratio` is the number of children hit by search, out of the total number of children of that parent. Threshold is hardcoded `simple_ratio_thresh = 0.4` in `chroma_indexer.py`. Hybrid BM25 hits are never merged. See [`chunking-strategies.md`](chunking-strategies.md#parent-merge-auto-merge).
+**Hierarchical chunker + chroma or hybrid:** with **`expand`**, the chroma leg may auto-merge child hits to a parent when **`ratio > 0.4`** (see [`chunking-strategies.md`](chunking-strategies.md#parent-merge-auto-merge)). BM25 uses node-store expansion only. Default expand comes from `search_expand` in `env.toml` when the request omits `expand`.
 
 ---
 
@@ -225,12 +225,12 @@ Final results:              [B, A, C]
 
 | Situation | Suggestion |
 |-----------|------------|
-| General Q&A over prose | **vector** or **hybrid** |
+| General Q&A over prose | **chroma** or **hybrid** |
 | Logs, SKUs, legal clauses with exact terms | **bm25** or **hybrid** |
 | Unsure which failure mode hurts more | **hybrid** |
 | Top results still feel “almost right” | Turn on **rerank** |
 
-Indexer is set in the Ingester UI on **first upload** to a collection. Rerank is toggled on each search or chat question.
+Indexer is set in the Index UI on **first upload** to a collection. Rerank and expand can be toggled per search (Index UI) or taken from `env.toml` defaults (eval, chat expand).
 
 ---
 
