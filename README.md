@@ -106,6 +106,20 @@ cd triad-rag
 streamlit run eval/ui/run.py
 ```
 
+### UI screenshots
+
+**Index UI** — upload files, view collection metadata, test search on the Query tab:
+
+<p align="center">
+  <img src="docs/diagrams/ui-index-screenshot.png" alt="Index UI" width="800" style="border: 1px solid #d0d7de; border-radius: 8px;" />
+</p>
+
+**Chat UI** — select a collection and ask questions (orchestrator → retrieval → generation):
+
+<p align="center">
+  <img src="docs/diagrams/ui-chat-screenshot.png" alt="Chat UI" width="800" style="border: 1px solid #d0d7de; border-radius: 8px;" />
+</p>
+
 ### 4. First use
 
 1. **Index UI** — upload a file, pick indexer/chunker on a new collection (custom `index_id` if none saved yet).
@@ -241,5 +255,32 @@ Runtime data under `retrieval/data/` and `examples/data/` is gitignored. Example
 | Generation | [`generation_main_workflow.png`](docs/diagrams/generation_main_workflow.png) |
 | Metadata | [`retrieval_metadata_structure.png`](docs/diagrams/retrieval_metadata_structure.png) |
 | Technical layout | [`technical_architecture.png`](docs/diagrams/technical_architecture.png) |
+| Index UI | [`ui-index-screenshot.png`](docs/diagrams/ui-index-screenshot.png) |
+| Chat UI | [`ui-chat-screenshot.png`](docs/diagrams/ui-chat-screenshot.png) |
 
-Regenerate diagrams: [`docs/diagrams/markdowns/`](docs/diagrams/markdowns/).
+Regenerate architecture diagrams: [`docs/diagrams/markdowns/`](docs/diagrams/markdowns/).
+
+---
+
+## License
+
+This project is licensed under the [MIT License](LICENSE).
+
+---
+
+## Citation
+
+If you use this project in research, teaching, or a write-up, please cite:
+
+```bibtex
+@software{gautam2026triadrag,
+  author  = {Gautam, Dipesh},
+  title   = {{triad-rag}: Document-grounded {RAG} with {HTTP} microservices},
+  year    = {2026},
+  url     = {https://github.com/dipeshgautam2012/triad-rag}
+}
+```
+
+Plain text:
+
+> Gautam, D. (2026). *triad-rag: Document-grounded RAG with HTTP microservices*. https://github.com/dipeshgautam2012/triad-rag

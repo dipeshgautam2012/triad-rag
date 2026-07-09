@@ -411,7 +411,10 @@ def main() -> None:
                     summary = json.loads(summary_path.read_text(encoding="utf-8"))
                 except json.JSONDecodeError:
                     summary = {}
-            metrics = summary.get("metrics") if isinstance(summary.get("metrics"), dict) else {}
+            _raw_metrics = summary.get("metrics")
+            metrics: dict[str, object] = _raw_metrics if isinstance(_raw_metrics, dict) else {}
+            _top_k = metrics.get("top_k", 5)
+            _top_k_int = int(_top_k) if isinstance(_top_k, (int, float)) else 5
             st.session_state["eval_report"] = report_rows
             st.session_state["eval_summary"] = metrics or summarize_metrics(
                 [float(r.get("hit_at_k") or 0) for r in report_rows],
@@ -421,7 +424,7 @@ def main() -> None:
                     for r in report_rows
                     if str(r.get("faithful", "")).strip() != ""
                 ],
-                top_k=int(metrics.get("top_k") or 5),
+                top_k=_top_k_int,
             )
             st.session_state["eval_skip_faithfulness"] = bool(summary.get("skip_faithfulness"))
             st.session_state["eval_report_path"] = str(report_path)
