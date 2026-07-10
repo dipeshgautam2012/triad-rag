@@ -2,9 +2,7 @@
 
 ## Problem we solve
 
-You have documents (PDFs, notes) and want **answers grounded in those files** — not open-web guesses. That needs three steps: **ingest** files into searchable chunks, **retrieve** relevant passages for a question, and **generate** an answer from those passages only.
-
-**Not in scope:** a single monolith, shared Python imports between services, or retrieval calling an LLM directly.
+You have documents (PDFs, notes) and want **answers grounded in those files** — not guesses. That needs three steps: **ingest** files into searchable chunks, **retrieve** relevant passages for a question, and **generate** an answer from those passages only.
 
 ---
 
