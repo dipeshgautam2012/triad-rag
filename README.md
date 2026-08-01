@@ -198,17 +198,19 @@ Example dataset in repo: `eval/datasets/top_llm_questions/`. Optional env: `RETR
 
 ## Examples
 
-Scripts under `examples/` call the retrieval library **directly** (no HTTP services). Useful to smoke-test chunk → index → search.
+Scripts under `examples/` call the retrieval library **directly** (no HTTP services). Useful to smoke-test chunk → index → search. Default file: `examples/sample.txt`. Writes indexes under `examples/data/`.
 
 ```bash
 # From triad-rag/ with venv active
 python examples/index_and_query.py
-python examples/index_and_query.py --indexer bm25
-python examples/hybrid_index_and_query.py
-python examples/hybrid_index_and_query.py --chunker hierarchical
+python examples/index_and_query.py --indexer bm25 --query "keyword search" --top-k 5
+python examples/hybrid_index_and_query.py --chunker hierarchical --no-expand
 ```
 
-Uses `examples/sample.txt`. Writes indexes under `examples/data/`.
+| Script | Arguments |
+|--------|-----------|
+| `index_and_query.py` | `--indexer {chroma,bm25}`, `--file`, `--query`, `--top-k` |
+| `hybrid_index_and_query.py` | `--chunker {simple,hierarchical,sentence_window}`, `--file`, `--query`, `--top-k`, `--expand` / `--no-expand` |
 
 ---
 
