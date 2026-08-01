@@ -33,6 +33,7 @@ Architecture detail: [`docs/DESIGN.md`](docs/DESIGN.md).
 |------------------------|-------|
 | Run it now | [Quick start](#quick-start) |
 | Chunker / indexer choices | [What to know before upload](#what-to-know-before-upload) |
+| Library demos (no HTTP) | [Examples](#examples) |
 | Batch quality checks | [Evaluation](#evaluation) |
 | Modules, routes, disk layout | [`docs/DESIGN.md`](docs/DESIGN.md) |
 
@@ -195,6 +196,22 @@ Example dataset in repo: `eval/datasets/top_llm_questions/`. Optional env: `RETR
 
 ---
 
+## Examples
+
+Scripts under `examples/` call the retrieval library **directly** (no HTTP services). Useful to smoke-test chunk → index → search.
+
+```bash
+# From triad-rag/ with venv active
+python examples/index_and_query.py
+python examples/index_and_query.py --indexer bm25
+python examples/hybrid_index_and_query.py
+python examples/hybrid_index_and_query.py --chunker hierarchical
+```
+
+Uses `examples/sample.txt`. Writes indexes under `examples/data/`.
+
+---
+
 ## Commands
 
 | Task | Command |
@@ -228,8 +245,6 @@ API docs: `http://127.0.0.1:8100/docs`, `:8101/docs`, `:8102/docs`.
 Env overrides: `ORCH_*`, `RET_*`, `GEN_*`.
 
 `sparse_backend = "none"` → only `chroma` at upload. Use `json_bm25` or `sqlite_bm25` for `bm25` and `hybrid`.
-
-Runtime data under `retrieval/data/` and `examples/data/` is gitignored. Example scripts in `examples/` are tracked.
 
 ---
 
