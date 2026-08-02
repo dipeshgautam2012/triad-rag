@@ -86,7 +86,8 @@ Chunkers and indexers are selected **once per collection** upon initial upload. 
 
 ### Chunkers
 * **`simple` (Default):** Fixed-size splits. Ideal for general PDFs and text documents.
-* **`markdown`:** Splits on `#` headings (requires Markdown `.txt` files; convert PDFs first).
+
+* **`markdown`:** Splits on `#` headings (Content must be formatted in Markdown; convert PDFs to Markdown before uploading).
 * **`hierarchical`:** Creates small search hits that can return wider parent text contexts when expand is enabled (Use with `chroma` or `hybrid`; **do not use with `bm25` alone**).
 * **`sentence_window`:** FAQ-style approach; searches an anchor sentence and returns a surrounding context window.
 * **`semantic`:** Splits documents dynamically by topic change (requires embedding model during ingestion).
